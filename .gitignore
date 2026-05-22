@@ -1,0 +1,15 @@
+.venv/
+.claude/
+rozklad-rukhu-miskoho-elektrychnoho-ta-avtomobilnoho-transportu-dep-transport_2026-04-30/
+test/
+data/
+cache/
+save/
+__pycache__/
+outputs/
+.gitsave/
+other/
+CLAUDE.md
+THEORY_REPORT.md
+kyiv-routes.csv
+osm_easyway_data.csv

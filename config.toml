@@ -1,0 +1,68 @@
+# ╔══════════════════════════════════════════════════════════╗
+# ║                          CONFIG                          ║
+# ╚══════════════════════════════════════════════════════════╝
+
+[city]
+name = "Kyiv, Ukraine"
+center_lat = 50.4501
+center_lon = 30.5234
+crs_metric = "EPSG:32636"   # UTM зона 36N — для метричних розрахунків
+
+[paths]
+gtfs        = "../gtfs_static/"
+stops       = "../data/processed/stops.gpkg"
+osm_stops   = "../data/osm/osm_stops.gpkg"
+metro       = "../data/osm/metro.gpkg"
+hospitals   = "../data/osm/hospitals.gpkg"
+schools     = "../data/osm/schools.gpkg"
+walk_graph  = "../data/osm/kyiv_walk_graph.pkl"
+isochrones  = "../data/processed/isochrone_results.parquet"
+scores      = "../data/processed/accessibility_scores.csv"
+clustered   = "../data/processed/clustered_facilities.csv"
+population  = "../data/census/population.csv"
+
+[isochrone]
+# Радіуси ізохрон у метрах (швидкість ходьби 4.5 км/год)
+walk_10min_m = 750
+walk_30min_m = 2250
+
+# Яку ізохрону використовувати для індексу доступності: "10min" або "30min"
+# 10min — реалістична піша доступність до зупинки
+# 30min — максимальний радіус охоплення
+accessibility_radius = "10min"
+
+[peak_hours]
+# Пікові години у форматах HH:MM (для розрахунку частоти)
+morning_start = "07:00"
+morning_end   = "09:00"
+evening_start = "17:00"
+evening_end   = "19:00"
+total_peak_hours = 4   # загальна кількість пікових годин
+
+[accessibility]
+# Ваги компонентів індексу (сума = 1.0)
+weight_stops     = 0.4   # кількість зупинок у зоні
+weight_routes    = 0.3   # кількість унікальних маршрутів
+weight_frequency = 0.3   # середня частота рейсів/год
+
+[clustering]
+kmeans_k       = 4        # кількість кластерів KMeans
+random_state   = 42
+dbscan_eps     = 0.1      # радіус сусідства DBSCAN
+dbscan_min_samples = 5
+
+[offpeak_hours]
+# Міжпіковий час будніх днів
+start = "09:00"
+end   = "17:00"
+total_offpeak_hours = 8
+
+[catchment]
+# Порогові значення catchment-аналізу (хвилини ходьби)
+threshold_short_min = 10
+threshold_long_min  = 50
+
+[regression]
+test_size    = 0.2
+random_state = 42
+n_estimators = 200        # GradientBoostingRegressor
