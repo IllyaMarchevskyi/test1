@@ -45,6 +45,7 @@ def run() -> None:
 
     catchment_csv = f"{PROCESSED_DIR}/catchment_results_baseline.csv"
     catchment_buildings_path = f"{PROCESSED_DIR}/catchment_buildings_baseline.parquet"
+    building_weights_path = f"{PROCESSED_DIR}/building_weights_baseline.parquet"
     buildings_path = "../data/processed/buildings.parquet"
     scores_path = cfg["paths"]["scores"]
     bridge_path = "../gtfs_static/osm_easyway_data.csv"
@@ -68,6 +69,11 @@ def run() -> None:
         catchment_buildings_path,
         desc="Завантаження baseline catchment_buildings",
     )
+    if os.path.exists(building_weights_path):
+        building_weights = pd.read_parquet(building_weights_path, columns=["building_id", "levels_display"])
+        building_weights = building_weights.rename(columns={"levels_display": "building_levels"})
+        catchment_buildings = catchment_buildings.merge(building_weights, on="building_id", how="left")
+        print(f"  building_weights:    {len(building_weights):,} будинків")
     buildings = gpd.read_parquet(buildings_path, columns=["building_id", "geometry"])
     scores = pd.read_csv(scores_path, usecols=["facility_id", "facility_type", "name", "lat", "lon"])
     facilities = scores[["facility_id", "facility_type", "name", "lat", "lon"]].copy()
@@ -355,6 +361,7 @@ def run() -> None:
             const route = currentMode === 'peak' ? props.peak_route : props.offpeak_route;
             const transport = currentMode === 'peak' ? props.peak_transport : props.offpeak_transport;
             const routeOptions = currentMode === 'peak' ? props.peak_route_options : props.offpeak_route_options;
+            const buildingLevels = props.building_levels;
             const sourceStop = currentMode === 'peak' ? props.peak_source_stop : props.offpeak_source_stop;
             const destStop = currentMode === 'peak' ? props.peak_dest_stop : props.offpeak_dest_stop;
             const sourceStopLon = currentMode === 'peak' ? props.peak_source_stop_lon : props.offpeak_source_stop_lon;
@@ -363,6 +370,7 @@ def run() -> None:
             const destStopLat = currentMode === 'peak' ? props.peak_dest_stop_lat : props.offpeak_dest_stop_lat;
 
             let tooltip = 'Будинок #' + props.building_id;
+            if (typeof buildingLevels === 'number') tooltip += '<br>Поверхи: ' + buildingLevels.toFixed(1);
             if (typeof totalMin === 'number') tooltip += '<br>Загальний час: ' + totalMin.toFixed(1) + ' хв';
             tooltip += '<br>Група: ' + group;
             if (mode === 'transit') {{

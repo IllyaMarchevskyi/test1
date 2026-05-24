@@ -18,6 +18,7 @@ STEPS = [
     ("07b_base", "pipeline.step_07b_transit_matrix_baseline", "Baseline transit matrix"),
     ("07c_base", "pipeline.step_07c_catchment_calc_baseline", "Baseline catchment calculation"),
     ("07d_base", "pipeline.step_07d_results_map_baseline", "Baseline results map"),
+    ("08a_base", "pipeline.step_08a_building_weights_baseline", "Baseline building weights"),
 ]
 
 
