@@ -21,6 +21,8 @@ STEPS = [
     ("07d_base", "pipeline.step_07d_results_map_baseline", "Baseline results map"),
     ("08a_base", "pipeline.step_08a_building_weights_baseline", "Baseline building weights"),
     ("08b_base", "pipeline.step_08b_facility_entropy_baseline", "Baseline facility entropy"),
+    ("09_index", "pipeline.step_09_accessibility_index_baseline", "Baseline accessibility index"),
+    ("10_rl", "pipeline.step_10_graph_rl_baseline", "Baseline graph RL"),
 ]
 
 STEP_OUTPUTS = {
@@ -54,6 +56,22 @@ STEP_OUTPUTS = {
         PIPELINE_DIR / "data/processed/facility_entropy_baseline.parquet",
         PIPELINE_DIR / "data/processed/facility_entropy_baseline.csv",
         PIPELINE_DIR / "data/processed/facility_entropy_preview_baseline.csv",
+    ],
+    "09_index": [
+        PIPELINE_DIR / "data/processed/accessibility_index_baseline.csv",
+        PIPELINE_DIR / "data/processed/global_metrics_baseline.json",
+        PIPELINE_DIR / "data/processed/car_accessibility_baseline.csv",
+        PIPELINE_DIR / "data/processed/kyiv_drive_graph_proj_baseline.pkl",
+    ],
+    "10_rl": [
+        PIPELINE_DIR / "data/processed/rl_results.json",
+        PIPELINE_DIR / "data/processed/optimal_frequencies.csv",
+        PIPELINE_DIR / "data/processed/rl_model.zip",
+        PIPELINE_DIR / "data/processed/rl_checkpoints",
+        PIPELINE_DIR / "data/outputs/rl_learning_curve.png",
+        PIPELINE_DIR / "data/outputs/rl_top_route_changes.png",
+        PIPELINE_DIR / "data/outputs/rl_before_after_scatter.png",
+        PIPELINE_DIR / "data/outputs/rl_i_peak_hist.png",
     ],
 }
 
