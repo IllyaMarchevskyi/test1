@@ -8,6 +8,7 @@ Keeps old 07b intact and writes separate baseline caches.
 
 def run() -> None:
     from config_loader import cfg
+    import math
     import os
     import warnings
 
@@ -231,41 +232,67 @@ def run() -> None:
     evening_window_duration_min = (peak_windows[1][1] - peak_windows[1][0]) / 60.0
     offpeak_window_duration_min = (offpeak_end - offpeak_start) / 60.0
 
-    def calc_avg_wait_window(departures: list[int], fallback_window_min: float) -> float:
+    def calc_wait_stats_window(departures: list[int], fallback_window_min: float) -> dict[str, float]:
         if not departures:
-            return 999.0
+            return {"avg_wait_min": 999.0, "sigma_min": 0.0, "adj_wait_min": 999.0}
         departures = sorted(set(departures))
         if len(departures) == 1:
-            return fallback_window_min / 2.0
+            avg_wait_min = fallback_window_min / 2.0
+            return {"avg_wait_min": avg_wait_min, "sigma_min": 0.0, "adj_wait_min": avg_wait_min}
         intervals = [(departures[i + 1] - departures[i]) / 60.0 for i in range(len(departures) - 1)]
-        return sum(intervals) / len(intervals) / 2.0
+        avg_interval = sum(intervals) / len(intervals)
+        variance = sum((value - avg_interval) ** 2 for value in intervals) / len(intervals)
+        sigma_min = math.sqrt(variance)
+        avg_wait_min = avg_interval / 2.0
+        adj_wait_min = avg_wait_min + 0.5 * sigma_min
+        return {
+            "avg_wait_min": avg_wait_min,
+            "sigma_min": sigma_min,
+            "adj_wait_min": adj_wait_min,
+        }
 
-    def calc_peak_wait(stop_a: str, stop_b: str) -> float:
-        morning_wait = calc_avg_wait_window(
+    def calc_peak_wait_stats(stop_a: str, stop_b: str) -> dict[str, float]:
+        morning_stats = calc_wait_stats_window(
             pair_depart_times_peak_morning.get((stop_a, stop_b), []),
             morning_window_duration_min,
         )
-        evening_wait = calc_avg_wait_window(
+        evening_stats = calc_wait_stats_window(
             pair_depart_times_peak_evening.get((stop_a, stop_b), []),
             evening_window_duration_min,
         )
-        valid = [value for value in [morning_wait, evening_wait] if value < 999.0]
+        valid = [
+            stats
+            for stats in [morning_stats, evening_stats]
+            if float(stats["avg_wait_min"]) < 999.0
+        ]
         if not valid:
-            return 999.0
-        return sum(valid) / len(valid)
+            return {"avg_wait_min": 999.0, "sigma_min": 0.0, "adj_wait_min": 999.0}
+        return {
+            "avg_wait_min": sum(item["avg_wait_min"] for item in valid) / len(valid),
+            "sigma_min": sum(item["sigma_min"] for item in valid) / len(valid),
+            "adj_wait_min": sum(item["adj_wait_min"] for item in valid) / len(valid),
+        }
 
     wait_peak = pd.DataFrame(
         [
-            {"stop_A": stop_a, "stop_B": stop_b, "avg_wait_min": calc_peak_wait(stop_a, stop_b)}
+            {
+                "stop_A": stop_a,
+                "stop_B": stop_b,
+                **calc_peak_wait_stats(stop_a, stop_b),
+            }
             for stop_a, targets in stop_reachability_peak.items()
             for stop_b in targets
         ]
     )
     if wait_peak.empty:
-        wait_peak = pd.DataFrame(columns=["stop_A", "stop_B", "avg_wait_min"])
+        wait_peak = pd.DataFrame(columns=["stop_A", "stop_B", "avg_wait_min", "sigma_min", "adj_wait_min"])
     wait_offpeak = pd.DataFrame(
         [
-            {"stop_A": stop_a, "stop_B": stop_b, "avg_wait_min": calc_avg_wait_window(departures, offpeak_window_duration_min)}
+            {
+                "stop_A": stop_a,
+                "stop_B": stop_b,
+                **calc_wait_stats_window(departures, offpeak_window_duration_min),
+            }
             for (stop_a, stop_b), departures in pair_depart_times_offpeak.items()
         ]
     )

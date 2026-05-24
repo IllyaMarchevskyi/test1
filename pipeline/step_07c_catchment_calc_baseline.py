@@ -125,8 +125,13 @@ def run() -> None:
             "route_options": getattr(row, "route_options", None),
         }
 
-    wait_peak_dict = {(row.stop_A, row.stop_B): float(row.avg_wait_min) for row in wait_peak.itertuples(index=False)}
-    wait_offpeak_dict = {(row.stop_A, row.stop_B): float(row.avg_wait_min) for row in wait_offpeak.itertuples(index=False)}
+    wait_peak_value_col = "adj_wait_min" if "adj_wait_min" in wait_peak.columns else "avg_wait_min"
+    wait_offpeak_value_col = "adj_wait_min" if "adj_wait_min" in wait_offpeak.columns else "avg_wait_min"
+    wait_peak_dict = {(row.stop_A, row.stop_B): float(getattr(row, wait_peak_value_col)) for row in wait_peak.itertuples(index=False)}
+    wait_offpeak_dict = {
+        (row.stop_A, row.stop_B): float(getattr(row, wait_offpeak_value_col))
+        for row in wait_offpeak.itertuples(index=False)
+    }
 
     print("Precompute nearest nodes для будинків...")
     bld_nodes = ox.distance.nearest_nodes(g_proj, X=buildings.geometry.x.values, Y=buildings.geometry.y.values)
