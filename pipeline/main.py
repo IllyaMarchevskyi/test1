@@ -21,6 +21,7 @@ STEPS = [
     ("07d_base", "pipeline.step_07d_results_map_baseline", "Baseline results map"),
     ("08a_base", "pipeline.step_08a_building_weights_baseline", "Baseline building weights"),
     ("08b_base", "pipeline.step_08b_facility_entropy_baseline", "Baseline facility entropy"),
+    ("08c_missing_names", "pipeline.step_08c_missing_names_map", "Facilities with missing names map"),
     ("09_index", "pipeline.step_09_accessibility_index_baseline", "Baseline accessibility index"),
     ("10_rl", "pipeline.step_10_graph_rl_baseline", "Baseline graph RL"),
 ]
@@ -56,6 +57,10 @@ STEP_OUTPUTS = {
         PIPELINE_DIR / "data/processed/facility_entropy_baseline.parquet",
         PIPELINE_DIR / "data/processed/facility_entropy_baseline.csv",
         PIPELINE_DIR / "data/processed/facility_entropy_preview_baseline.csv",
+    ],
+    "08c_missing_names": [
+        PIPELINE_DIR / "data/processed/facilities_missing_names.csv",
+        PIPELINE_DIR / "data/outputs/facilities_missing_names_map.html",
     ],
     "09_index": [
         PIPELINE_DIR / "data/processed/accessibility_index_baseline.csv",
