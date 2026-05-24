@@ -33,6 +33,7 @@ def run() -> None:
     BUILDINGS_PATH = Path("../data/processed/buildings.parquet")
 
     OUT_INDEX_CSV = PROCESSED_DIR / "accessibility_index_baseline.csv"
+    OUT_PREVIEW_CSV = PROCESSED_DIR / "accessibility_index_preview_baseline.csv"
     OUT_GLOBAL_JSON = PROCESSED_DIR / "global_metrics_baseline.json"
     CAR_INDEX_CSV = PROCESSED_DIR / "car_accessibility_baseline.csv"
     DRIVE_GRAPH_CACHE = PROCESSED_DIR / "kyiv_drive_graph_proj_baseline.pkl"
@@ -53,7 +54,7 @@ def run() -> None:
             return False
         return min(path.stat().st_mtime for path in outputs) >= max(path.stat().st_mtime for path in inputs)
 
-    if outputs_fresh([OUT_INDEX_CSV, OUT_GLOBAL_JSON], required):
+    if outputs_fresh([OUT_INDEX_CSV, OUT_PREVIEW_CSV, OUT_GLOBAL_JSON], required):
         cached = pd.read_csv(OUT_INDEX_CSV)
         print(f"09_index: кеш індексу завантажено: {len(cached):,} закладів")
         print(f"Середній I*_peak: {cached['I_peak'].mean():.4f}")
@@ -292,6 +293,19 @@ def run() -> None:
     )
     output_df.to_csv(OUT_INDEX_CSV, index=False, encoding="utf-8")
 
+    preview_df = result[
+        [
+            "facility_id",
+            "facility_type",
+            "name",
+            "I_peak",
+            "I_offpeak",
+            "R",
+            "TGI",
+        ]
+    ].copy()
+    preview_df.to_csv(OUT_PREVIEW_CSV, index=False, encoding="utf-8")
+
     global_metrics = {
         "gini_peak": gini_peak,
         "gini_offpeak": gini_offpeak,
@@ -304,11 +318,11 @@ def run() -> None:
     }
     OUT_GLOBAL_JSON.write_text(json.dumps(global_metrics, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    preview = result[["facility_id", "facility_type", "name", "I_peak", "I_offpeak", "R", "TGI"]].copy()
-    top5 = preview.sort_values("I_peak", ascending=False).head(5)
-    bottom5 = preview.sort_values("I_peak", ascending=True).head(5)
+    top5 = preview_df.sort_values("I_peak", ascending=False).head(5)
+    bottom5 = preview_df.sort_values("I_peak", ascending=True).head(5)
 
     print(f"09_index: індекс збережено в {OUT_INDEX_CSV}")
+    print(f"09_index: preview збережено в {OUT_PREVIEW_CSV}")
     print(f"09_index: глобальні метрики збережено в {OUT_GLOBAL_JSON}")
     print(f"Середній I*_peak: {output_df['I_peak'].mean():.4f}")
     print(f"Медіана I*_peak: {output_df['I_peak'].median():.4f}")

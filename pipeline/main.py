@@ -64,6 +64,7 @@ STEP_OUTPUTS = {
     ],
     "09_index": [
         PIPELINE_DIR / "data/processed/accessibility_index_baseline.csv",
+        PIPELINE_DIR / "data/processed/accessibility_index_preview_baseline.csv",
         PIPELINE_DIR / "data/processed/global_metrics_baseline.json",
         PIPELINE_DIR / "data/processed/car_accessibility_baseline.csv",
         PIPELINE_DIR / "data/processed/kyiv_drive_graph_proj_baseline.pkl",
