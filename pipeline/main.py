@@ -20,6 +20,7 @@ STEPS = [
     ("07c_base", "pipeline.step_07c_catchment_calc_baseline", "Baseline catchment calculation"),
     ("07d_base", "pipeline.step_07d_results_map_baseline", "Baseline results map"),
     ("08a_base", "pipeline.step_08a_building_weights_baseline", "Baseline building weights"),
+    ("08b_base", "pipeline.step_08b_facility_entropy_baseline", "Baseline facility entropy"),
 ]
 
 STEP_OUTPUTS = {
@@ -48,6 +49,11 @@ STEP_OUTPUTS = {
     ],
     "08a_base": [
         PIPELINE_DIR / "data/processed/building_weights_baseline.parquet",
+    ],
+    "08b_base": [
+        PIPELINE_DIR / "data/processed/facility_entropy_baseline.parquet",
+        PIPELINE_DIR / "data/processed/facility_entropy_baseline.csv",
+        PIPELINE_DIR / "data/processed/facility_entropy_preview_baseline.csv",
     ],
 }
 
