@@ -60,7 +60,7 @@ total_offpeak_hours = 8
 [catchment]
 # Порогові значення catchment-аналізу (хвилини ходьби)
 threshold_short_min = 10
-threshold_long_min  = 50
+threshold_long_min  = 30
 
 [regression]
 test_size    = 0.2
