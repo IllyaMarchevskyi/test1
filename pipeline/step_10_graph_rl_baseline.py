@@ -18,6 +18,7 @@ def run() -> None:
     import networkx as nx
     import numpy as np
     import pandas as pd
+    from shapely import wkt
     from tqdm.auto import tqdm
 
     warnings.filterwarnings("ignore")
@@ -57,6 +58,11 @@ def run() -> None:
     BUILDING_WEIGHTS = PROCESSED_DIR / "building_weights_baseline.parquet"
     EASYWAY_ROUTES = Path("../gtfs_static/easyway_routes.csv")
     EASYWAY_METRO = Path("../gtfs_static/easyway_metro.csv")
+    SCORES_PATH = Path("../data/processed/accessibility_scores.csv")
+    OSM_BRIDGE_PATH = Path("../gtfs_static/osm_easyway_data.csv")
+    OSM_STOPS_PATH = Path("../gtfs_static/osm_stops.csv")
+    OSM_BRIDGE_METRO_PATH = Path("../gtfs_static/osm_easyway_metro_data.csv")
+    GMETRO_PATH = Path("../gtfs_static/gmetro.csv")
 
     RL_RESULTS_JSON = PROCESSED_DIR / "rl_results.json"
     OPT_FREQ_CSV = PROCESSED_DIR / "optimal_frequencies.csv"
@@ -158,6 +164,62 @@ def run() -> None:
             hh, mm, ss = raw.split(":")
             times.append(int(hh) * 3600 + int(mm) * 60 + int(ss))
         return sorted(times)
+
+    def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+        radius = 6371000.0
+        phi1 = np.radians(lat1)
+        phi2 = np.radians(lat2)
+        dphi = np.radians(lat2 - lat1)
+        dlambda = np.radians(lon2 - lon1)
+        a = np.sin(dphi / 2.0) ** 2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlambda / 2.0) ** 2
+        return float(2.0 * radius * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a)))
+
+    def load_stop_coords_map() -> dict[str, tuple[float, float]]:
+        frames: list[pd.DataFrame] = []
+
+        if OSM_BRIDGE_PATH.exists() and OSM_STOPS_PATH.exists():
+            bridge = pd.read_csv(OSM_BRIDGE_PATH, usecols=["osm_id", "stop_id"]).dropna()
+            bridge["osm_id"] = bridge["osm_id"].astype(str)
+            bridge["stop_id"] = bridge["stop_id"].astype(str)
+            osm_stops_raw = pd.read_csv(OSM_STOPS_PATH).dropna(subset=["geometry"]).copy()
+            osm_stops_raw["geometry"] = osm_stops_raw["geometry"].map(wkt.loads)
+            osm_stops_raw["osm_id"] = osm_stops_raw.index.astype(str)
+            osm_stops_raw["lon"] = osm_stops_raw["geometry"].map(lambda geom: getattr(geom, "x", np.nan))
+            osm_stops_raw["lat"] = osm_stops_raw["geometry"].map(lambda geom: getattr(geom, "y", np.nan))
+            frames.append(
+                bridge.merge(
+                    osm_stops_raw[["osm_id", "lon", "lat"]],
+                    on="osm_id",
+                    how="left",
+                )[["stop_id", "lon", "lat"]]
+            )
+
+        if OSM_BRIDGE_METRO_PATH.exists() and GMETRO_PATH.exists():
+            bridge_metro = pd.read_csv(OSM_BRIDGE_METRO_PATH, usecols=["osm_id", "stop_id"]).dropna()
+            bridge_metro["osm_id"] = bridge_metro["osm_id"].astype(str)
+            bridge_metro["stop_id"] = bridge_metro["stop_id"].astype(str)
+            gmetro_raw = pd.read_csv(GMETRO_PATH).dropna(subset=["geometry"]).copy()
+            gmetro_raw["geometry"] = gmetro_raw["geometry"].map(wkt.loads)
+            gmetro_raw["osm_id"] = gmetro_raw.index.astype(str)
+            gmetro_raw["lon"] = gmetro_raw["geometry"].map(lambda geom: getattr(geom, "x", np.nan))
+            gmetro_raw["lat"] = gmetro_raw["geometry"].map(lambda geom: getattr(geom, "y", np.nan))
+            frames.append(
+                bridge_metro.merge(
+                    gmetro_raw[["osm_id", "lon", "lat"]],
+                    on="osm_id",
+                    how="left",
+                )[["stop_id", "lon", "lat"]]
+            )
+
+        if not frames:
+            return {}
+
+        coords_df = pd.concat(frames, ignore_index=True)
+        coords_df = coords_df.dropna(subset=["lon", "lat"]).drop_duplicates(subset=["stop_id"])
+        return {
+            str(row.stop_id): (float(row.lat), float(row.lon))
+            for row in coords_df.itertuples(index=False)
+        }
 
     easyway = easyway[easyway["schedules"] != r"\N"].copy()
     easyway["stop_id"] = easyway["stop_id"].astype(str)
@@ -348,6 +410,11 @@ def run() -> None:
                     current_freq = max(float(self.current_freq[idx]), 0.0)
                     if current_freq <= 0 or not self.active[idx]:
                         continue
+                    # Спрощення для локального RL:
+                    # середній wait масштабуємо обернено до частоти,
+                    # але sigma лишаємо сталою. Тобто міняємо лише
+                    # середню компоненту очікування, а не повністю
+                    # перебудовуємо розподіл інтервалів.
                     scaled_wait = float(wait_min) * (base_freq / current_freq)
                     adjusted_total = (
                         float(walk_in or 0.0)
@@ -383,9 +450,13 @@ def run() -> None:
                     self.budget[transport_type] += 1
 
             if not invalid_action:
-                affected = facilities_by_route.get(route_idx, set())
-                for fid in affected:
-                    self.I_peak[fid] = self._recalc_I(fid)
+                if TARGET_FACILITY_ID:
+                    # У локальному режимі перераховуємо лише цільовий заклад.
+                    self.I_peak[TARGET_FACILITY_ID] = self._recalc_I(TARGET_FACILITY_ID)
+                else:
+                    affected = facilities_by_route.get(route_idx, set())
+                    for fid in affected:
+                        self.I_peak[fid] = self._recalc_I(fid)
 
             if TARGET_FACILITY_ID:
                 new_value = float(self.I_peak.get(TARGET_FACILITY_ID, 0.0))
@@ -513,6 +584,39 @@ def run() -> None:
 
     optimal_freq_df = pd.DataFrame(route_deltas).sort_values("delta", ascending=False).reset_index(drop=True)
     optimal_freq_df.to_csv(OPT_FREQ_CSV, index=False, encoding="utf-8")
+
+    if TARGET_FACILITY_ID and SCORES_PATH.exists():
+        scores = pd.read_csv(SCORES_PATH, usecols=["facility_id", "lat", "lon", "name"])
+        scores["facility_id"] = scores["facility_id"].astype(str)
+        target_row = scores[scores["facility_id"] == TARGET_FACILITY_ID]
+        stop_coords_map = load_stop_coords_map()
+        changed_routes = optimal_freq_df[optimal_freq_df["delta"] != 0].copy()
+
+        if not target_row.empty and stop_coords_map and not changed_routes.empty:
+            facility_lat = float(target_row.iloc[0]["lat"])
+            facility_lon = float(target_row.iloc[0]["lon"])
+            facility_name = str(target_row.iloc[0].get("name", TARGET_FACILITY_ID))
+            print(f"10_rl: маршрути, що змінились для {TARGET_FACILITY_ID} ({facility_name}):")
+            for row in changed_routes.itertuples(index=False):
+                route_stop_ids = route_stops.get(str(row.route_id), set())
+                distances = []
+                for stop_id in route_stop_ids:
+                    coords = stop_coords_map.get(str(stop_id))
+                    if coords is None:
+                        continue
+                    stop_lat, stop_lon = coords
+                    distances.append(haversine_m(stop_lat, stop_lon, facility_lat, facility_lon))
+                if distances:
+                    min_dist_m = min(distances)
+                    print(
+                        f"  {row.route_id} ({row.transport} {row.route}): "
+                        f"delta={int(row.delta):+d}, найближча зупинка до {TARGET_FACILITY_ID}: {min_dist_m:.0f}м"
+                    )
+                else:
+                    print(
+                        f"  {row.route_id} ({row.transport} {row.route}): "
+                        f"delta={int(row.delta):+d}, найближча зупинка до {TARGET_FACILITY_ID}: н/д"
+                    )
 
     before_df = index_df[["facility_id", "I_peak"]].rename(columns={"I_peak": "I_peak_before"})
     after_df = pd.DataFrame(
