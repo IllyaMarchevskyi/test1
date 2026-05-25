@@ -66,12 +66,17 @@ def run() -> None:
 
     RL_RESULTS_JSON = PROCESSED_DIR / "rl_results.json"
     OPT_FREQ_CSV = PROCESSED_DIR / "optimal_frequencies.csv"
+    TARGET_BEFORE_AFTER_JSON = PROCESSED_DIR / "target_facility_before_after.json"
+    OPT_FREQ_TARGET_CSV = PROCESSED_DIR / "optimal_frequencies_H327.csv"
     MODEL_PATH = PROCESSED_DIR / "rl_model"
     CHECKPOINT_DIR = PROCESSED_DIR / "rl_checkpoints"
     LEARNING_CURVE_PNG = OUTPUTS_DIR / "rl_learning_curve.png"
     TOP_CHANGES_PNG = OUTPUTS_DIR / "rl_top_route_changes.png"
     SCATTER_PNG = OUTPUTS_DIR / "rl_before_after_scatter.png"
     HIST_PNG = OUTPUTS_DIR / "rl_i_peak_hist.png"
+    TARGET_LEARNING_CURVE_PNG = OUTPUTS_DIR / "rl_H327_training_curve.png"
+    TARGET_ROUTE_CHANGES_PNG = OUTPUTS_DIR / "rl_H327_route_changes.png"
+    TARGET_WAIT_SCATTER_PNG = OUTPUTS_DIR / "rl_H327_wait_before_after_scatter.png"
     RL_CFG = cfg.get("rl", {})
     USE_SUBPROC = bool(RL_CFG.get("use_subproc", False))
     N_ENVS = max(1, int(RL_CFG.get("n_envs", 1)))
@@ -131,6 +136,7 @@ def run() -> None:
         f"total_timesteps={TOTAL_TIMESTEPS}"
     )
     index_df = pd.read_csv(ACCESSIBILITY_INDEX)
+    global_index_df = index_df.copy()
     catchment = pd.read_parquet(CATCHMENT_BUILDINGS)
     entropy = pd.read_parquet(FACILITY_ENTROPY)
     weights = pd.read_parquet(BUILDING_WEIGHTS, columns=["building_id", "weight_wb"])
@@ -334,6 +340,14 @@ def run() -> None:
     hnorm_by_facility = dict(zip(entropy["facility_id"].astype(str), pd.to_numeric(entropy["Hnorm_peak"], errors="coerce").fillna(0.0)))
     base_freq_by_route = dict(zip(route_stats["route_id"], route_stats["current_freq"]))
     target_initial_i_peak = float(initial_i_peak.get(TARGET_FACILITY_ID, 0.0)) if TARGET_FACILITY_ID else None
+    global_initial_i_peak = dict(
+        zip(
+            global_index_df["facility_id"].astype(str),
+            pd.to_numeric(global_index_df["I_peak"], errors="coerce").fillna(0.0),
+        )
+    )
+    global_initial_mean = float(pd.to_numeric(global_index_df["I_peak"], errors="coerce").fillna(0.0).mean())
+    global_n_facilities = max(len(global_initial_i_peak), 1)
 
     class TransitGAT(torch.nn.Module):
         def __init__(self, in_channels: int = 6, hidden: int = 64, out: int = 32):
@@ -460,11 +474,12 @@ def run() -> None:
 
             if TARGET_FACILITY_ID:
                 new_value = float(self.I_peak.get(TARGET_FACILITY_ID, 0.0))
-                reward = -1.0 if invalid_action else (new_value - self.prev_value)
+                reward = -0.1 if invalid_action else (new_value - self.prev_value)
                 self.prev_value = new_value
+                self.current_I_H327 = new_value
             else:
                 new_mean = float(np.mean(list(self.I_peak.values()))) if self.I_peak else 0.0
-                reward = -1.0 if invalid_action else (new_mean - self.prev_mean)
+                reward = -0.1 if invalid_action else (new_mean - self.prev_mean)
                 self.prev_mean = new_mean
 
             self.step_count += 1
@@ -481,6 +496,7 @@ def run() -> None:
             self.I_peak = initial_i_peak.copy()
             self.prev_mean = float(np.mean(list(self.I_peak.values()))) if self.I_peak else 0.0
             self.prev_value = float(target_initial_i_peak or 0.0)
+            self.current_I_H327 = float(target_initial_i_peak or 0.0)
             return self._get_obs(), {}
 
     class ProgressCallback(BaseCallback):
@@ -489,20 +505,37 @@ def run() -> None:
             self.log_every = log_every
             self.checkpoint_every = checkpoint_every
             self.history = []
+            self.target_i_history = []
 
         def _on_step(self) -> bool:
             rewards = self.locals.get("rewards")
             if rewards is not None and len(rewards):
                 self.history.append(float(np.mean(rewards)))
 
+            if TARGET_FACILITY_ID:
+                try:
+                    current_i = self.training_env.get_attr("current_I_H327")[0]
+                    self.target_i_history.append(float(current_i))
+                except Exception:
+                    pass
+
             if self.n_calls % self.log_every == 0 and self.history:
                 recent = self.history[-min(len(self.history), self.log_every):]
                 progress_pct = (100.0 * self.num_timesteps / TOTAL_TIMESTEPS) if TOTAL_TIMESTEPS > 0 else 0.0
-                print(
-                    f"10_rl: learn progress={progress_pct:.1f}% "
-                    f"calls={self.n_calls} timesteps={self.num_timesteps} "
-                    f"mean_reward={np.mean(recent):.6f}"
-                )
+                if TARGET_FACILITY_ID and self.target_i_history:
+                    current_i = self.target_i_history[-1]
+                    print(
+                        f"10_rl: learn progress={progress_pct:.1f}% "
+                        f"calls={self.n_calls} timesteps={self.num_timesteps} "
+                        f"mean_reward={np.mean(recent):.6f} "
+                        f"I_peak({TARGET_FACILITY_ID})={current_i:.6f}"
+                    )
+                else:
+                    print(
+                        f"10_rl: learn progress={progress_pct:.1f}% "
+                        f"calls={self.n_calls} timesteps={self.num_timesteps} "
+                        f"mean_reward={np.mean(recent):.6f}"
+                    )
 
             if self.n_calls % self.checkpoint_every == 0:
                 checkpoint_path = CHECKPOINT_DIR / f"ppo_checkpoint_{self.n_calls}"
@@ -562,7 +595,7 @@ def run() -> None:
         eval_progress.update(1)
         eval_progress.set_postfix(
             step=eval_env.step_count,
-            mean_I_peak=f"{eval_env.prev_mean:.6f}",
+            mean_I_peak=f"{(eval_env.current_I_H327 if TARGET_FACILITY_ID else eval_env.prev_mean):.6f}",
         )
     eval_progress.close()
 
@@ -584,20 +617,22 @@ def run() -> None:
 
     optimal_freq_df = pd.DataFrame(route_deltas).sort_values("delta", ascending=False).reset_index(drop=True)
     optimal_freq_df.to_csv(OPT_FREQ_CSV, index=False, encoding="utf-8")
+    if TARGET_FACILITY_ID:
+        optimal_freq_df.to_csv(OPT_FREQ_TARGET_CSV, index=False, encoding="utf-8")
 
+    target_changed_routes = optimal_freq_df[optimal_freq_df["delta"] != 0].copy()
     if TARGET_FACILITY_ID and SCORES_PATH.exists():
         scores = pd.read_csv(SCORES_PATH, usecols=["facility_id", "lat", "lon", "name"])
         scores["facility_id"] = scores["facility_id"].astype(str)
         target_row = scores[scores["facility_id"] == TARGET_FACILITY_ID]
         stop_coords_map = load_stop_coords_map()
-        changed_routes = optimal_freq_df[optimal_freq_df["delta"] != 0].copy()
 
-        if not target_row.empty and stop_coords_map and not changed_routes.empty:
+        if not target_row.empty and stop_coords_map and not target_changed_routes.empty:
             facility_lat = float(target_row.iloc[0]["lat"])
             facility_lon = float(target_row.iloc[0]["lon"])
             facility_name = str(target_row.iloc[0].get("name", TARGET_FACILITY_ID))
             print(f"10_rl: маршрути, що змінились для {TARGET_FACILITY_ID} ({facility_name}):")
-            for row in changed_routes.itertuples(index=False):
+            for row in target_changed_routes.itertuples(index=False):
                 route_stop_ids = route_stops.get(str(row.route_id), set())
                 distances = []
                 for stop_id in route_stop_ids:
@@ -636,15 +671,23 @@ def run() -> None:
 
     before_mean = float(compare_df["I_peak_before"].mean())
     after_mean = float(compare_df["I_peak_after"].mean())
+    target_after_i_peak = float(eval_env.I_peak.get(TARGET_FACILITY_ID, 0.0)) if TARGET_FACILITY_ID else None
+    global_after_mean = None
+    if TARGET_FACILITY_ID:
+        before_target = float(global_initial_i_peak.get(TARGET_FACILITY_ID, 0.0))
+        global_after_mean = global_initial_mean + ((target_after_i_peak - before_target) / global_n_facilities)
 
     results = {
+        "target_facility_id": TARGET_FACILITY_ID,
         "before": {
-            "mean_I_peak": before_mean,
+            "I_peak_H327": float(target_initial_i_peak) if TARGET_FACILITY_ID else None,
+            "mean_I_peak": global_initial_mean if TARGET_FACILITY_ID else before_mean,
             "gini": gini(compare_df["I_peak_before"]),
             "moran": None,
         },
         "after": {
-            "mean_I_peak": after_mean,
+            "I_peak_H327": target_after_i_peak if TARGET_FACILITY_ID else None,
+            "mean_I_peak": global_after_mean if TARGET_FACILITY_ID else after_mean,
             "gini": gini(compare_df["I_peak_after"]),
             "moran": None,
         },
@@ -665,6 +708,34 @@ def run() -> None:
     }
     RL_RESULTS_JSON.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    if TARGET_FACILITY_ID and SCORES_PATH.exists():
+        scores = pd.read_csv(SCORES_PATH, usecols=["facility_id", "name"])
+        scores["facility_id"] = scores["facility_id"].astype(str)
+        facility_name = str(
+            scores.loc[scores["facility_id"] == TARGET_FACILITY_ID, "name"].iloc[0]
+            if not scores.loc[scores["facility_id"] == TARGET_FACILITY_ID, "name"].empty
+            else TARGET_FACILITY_ID
+        )
+        target_before_after = {
+            "facility_id": TARGET_FACILITY_ID,
+            "name": facility_name,
+            "I_peak_before": float(target_initial_i_peak or 0.0),
+            "I_peak_after": float(target_after_i_peak or 0.0),
+            "delta": float((target_after_i_peak or 0.0) - (target_initial_i_peak or 0.0)),
+            "delta_pct": float(
+                (((target_after_i_peak or 0.0) - (target_initial_i_peak or 0.0)) / (target_initial_i_peak or 1.0)) * 100.0
+            ) if float(target_initial_i_peak or 0.0) != 0.0 else None,
+            "routes_considered": route_ids,
+            "routes_changed": {
+                str(row.route_id): int(row.delta)
+                for row in target_changed_routes.itertuples(index=False)
+            },
+        }
+        TARGET_BEFORE_AFTER_JSON.write_text(
+            json.dumps(target_before_after, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
     history = callback.history if (callback is not None and callback.history) else [0.0]
     plt.figure(figsize=(10, 4))
     plt.plot(history, color="#1B6B23")
@@ -674,6 +745,16 @@ def run() -> None:
     plt.tight_layout()
     plt.savefig(LEARNING_CURVE_PNG, dpi=150)
     plt.close()
+    if TARGET_FACILITY_ID:
+        target_i_history = callback.target_i_history if (callback is not None and callback.target_i_history) else [float(target_initial_i_peak or 0.0)]
+        plt.figure(figsize=(10, 4))
+        plt.plot(target_i_history, color="#1B6B23")
+        plt.title(f"Навчання PPO: I*_peak({TARGET_FACILITY_ID}) по кроках")
+        plt.xlabel("Крок callback")
+        plt.ylabel(f"I*_peak({TARGET_FACILITY_ID})")
+        plt.tight_layout()
+        plt.savefig(TARGET_LEARNING_CURVE_PNG, dpi=150)
+        plt.close()
 
     top_changes = optimal_freq_df.reindex(optimal_freq_df["delta"].abs().sort_values(ascending=False).index).head(10)
     plt.figure(figsize=(10, 5))
@@ -684,6 +765,15 @@ def run() -> None:
     plt.tight_layout()
     plt.savefig(TOP_CHANGES_PNG, dpi=150)
     plt.close()
+    if TARGET_FACILITY_ID:
+        plt.figure(figsize=(10, 5))
+        plt.bar(top_changes["route_id"].astype(str), top_changes["delta"], color="#EB9328")
+        plt.title(f"Зміни частот маршрутів для {TARGET_FACILITY_ID}")
+        plt.xlabel("route_id")
+        plt.ylabel("Δ частоти")
+        plt.tight_layout()
+        plt.savefig(TARGET_ROUTE_CHANGES_PNG, dpi=150)
+        plt.close()
 
     plt.figure(figsize=(6, 6))
     plt.scatter(compare_df["I_peak_before"], compare_df["I_peak_after"], s=12, alpha=0.6, color="#2980B9")
@@ -706,6 +796,35 @@ def run() -> None:
     plt.tight_layout()
     plt.savefig(HIST_PNG, dpi=150)
     plt.close()
+
+    if TARGET_FACILITY_ID:
+        wait_plot_rows = []
+        for row in catchment.itertuples(index=False):
+            route_id = str(getattr(row, "peak_route_id", ""))
+            if route_id not in set(target_changed_routes["route_id"].astype(str)):
+                continue
+            old_wait = getattr(row, "peak_wait_min", np.nan)
+            if pd.isna(old_wait):
+                continue
+            route_idx = route_index.get(route_id)
+            if route_idx is None:
+                continue
+            base_freq = max(float(base_freq_by_route.get(route_id, 1.0)), 1.0)
+            curr_freq = max(float(eval_env.current_freq[route_idx]), 1.0)
+            new_wait = float(old_wait) * (base_freq / curr_freq)
+            wait_plot_rows.append({"route_id": route_id, "wait_before": float(old_wait), "wait_after": new_wait})
+        if wait_plot_rows:
+            wait_df = pd.DataFrame(wait_plot_rows)
+            plt.figure(figsize=(6, 6))
+            plt.scatter(wait_df["wait_before"], wait_df["wait_after"], s=12, alpha=0.6, color="#2980B9")
+            max_wait = max(wait_df["wait_before"].max(), wait_df["wait_after"].max())
+            plt.plot([0, max_wait], [0, max_wait], linestyle="--", color="#333333")
+            plt.xlabel("Очікування до")
+            plt.ylabel("Очікування після")
+            plt.title(f"Wait before/after для змінених маршрутів {TARGET_FACILITY_ID}")
+            plt.tight_layout()
+            plt.savefig(TARGET_WAIT_SCATTER_PNG, dpi=150)
+            plt.close()
 
     gat_model = TransitGAT()
     feature_tensor = torch.tensor(

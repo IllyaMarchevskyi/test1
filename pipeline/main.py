@@ -78,12 +78,17 @@ STEP_OUTPUTS = {
     "10_rl": [
         PIPELINE_DIR / "data/processed/rl_results.json",
         PIPELINE_DIR / "data/processed/optimal_frequencies.csv",
+        PIPELINE_DIR / "data/processed/optimal_frequencies_H327.csv",
+        PIPELINE_DIR / "data/processed/target_facility_before_after.json",
         PIPELINE_DIR / "data/processed/rl_model.zip",
         PIPELINE_DIR / "data/processed/rl_checkpoints",
         PIPELINE_DIR / "data/outputs/rl_learning_curve.png",
         PIPELINE_DIR / "data/outputs/rl_top_route_changes.png",
         PIPELINE_DIR / "data/outputs/rl_before_after_scatter.png",
         PIPELINE_DIR / "data/outputs/rl_i_peak_hist.png",
+        PIPELINE_DIR / "data/outputs/rl_H327_training_curve.png",
+        PIPELINE_DIR / "data/outputs/rl_H327_route_changes.png",
+        PIPELINE_DIR / "data/outputs/rl_H327_wait_before_after_scatter.png",
     ],
 }
 
