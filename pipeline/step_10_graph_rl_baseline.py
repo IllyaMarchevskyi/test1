@@ -289,7 +289,7 @@ def run() -> None:
             super().__init__()
             self.route_ids = route_ids
             self.route_types = route_stats["transport_type"].to_numpy(dtype=int)
-            self.initial_freq = route_stats["current_freq"].round().clip(lower=0, upper=12).to_numpy(dtype=int)
+            self.initial_freq = route_stats["current_freq"].round().clip(lower=1, upper=12).to_numpy(dtype=int)
             self.max_steps = MAX_STEPS
 
             self.initial_budget = {
@@ -372,18 +372,14 @@ def run() -> None:
                 elif self.current_freq[route_idx] >= 12:
                     invalid_action = True
                 else:
-                    if not self.active[route_idx]:
-                        self.active[route_idx] = 1
                     self.current_freq[route_idx] += 1
                     self.budget[transport_type] -= 1
             else:
-                if self.current_freq[route_idx] <= 0:
+                if self.current_freq[route_idx] <= 1:
                     invalid_action = True
                 else:
                     self.current_freq[route_idx] -= 1
                     self.budget[transport_type] += 1
-                    if self.current_freq[route_idx] == 0:
-                        self.active[route_idx] = 0
 
             if not invalid_action:
                 affected = facilities_by_route.get(route_idx, set())
