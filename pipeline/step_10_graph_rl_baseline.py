@@ -8,6 +8,7 @@ torch, torch_geometric, stable-baselines3, gymnasium/gym.
 
 
 def run() -> None:
+    from config_loader import cfg
     import json
     import os
     import warnings
@@ -38,7 +39,7 @@ def run() -> None:
         from torch_geometric.nn import GATConv
         from stable_baselines3 import PPO
         from stable_baselines3.common.callbacks import BaseCallback
-        from stable_baselines3.common.vec_env import SubprocVecEnv
+        from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError(
             "Для 10_rl бракує залежностей. Встановіть: "
@@ -64,6 +65,15 @@ def run() -> None:
     TOP_CHANGES_PNG = OUTPUTS_DIR / "rl_top_route_changes.png"
     SCATTER_PNG = OUTPUTS_DIR / "rl_before_after_scatter.png"
     HIST_PNG = OUTPUTS_DIR / "rl_i_peak_hist.png"
+    RL_CFG = cfg.get("rl", {})
+    USE_SUBPROC = bool(RL_CFG.get("use_subproc", False))
+    N_ENVS = max(1, int(RL_CFG.get("n_envs", 1)))
+    MAX_STEPS = max(1, int(RL_CFG.get("max_steps", 50)))
+    TOTAL_TIMESTEPS = max(1, int(RL_CFG.get("total_timesteps", 50000)))
+    LEARNING_RATE = float(RL_CFG.get("learning_rate", 3e-4))
+    PPO_N_STEPS = max(1, int(RL_CFG.get("n_steps", 50)))
+    LOG_EVERY = max(1, int(RL_CFG.get("log_every", 100)))
+    CHECKPOINT_EVERY = max(1, int(RL_CFG.get("checkpoint_every", 500)))
 
     required = [
         ACCESSIBILITY_INDEX,
@@ -78,12 +88,41 @@ def run() -> None:
 
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
+    model_zip_path = Path(f"{MODEL_PATH}.zip")
+    final_outputs = [
+        RL_RESULTS_JSON,
+        OPT_FREQ_CSV,
+        model_zip_path,
+        LEARNING_CURVE_PNG,
+        TOP_CHANGES_PNG,
+        SCATTER_PNG,
+        HIST_PNG,
+    ]
+    if all(path.exists() for path in final_outputs):
+        outputs_mtime = min(path.stat().st_mtime for path in final_outputs)
+        inputs_mtime = max(path.stat().st_mtime for path in required)
+        if outputs_mtime >= inputs_mtime:
+            print("10_rl: кеш RL-результатів уже актуальний, пропускаємо повторне навчання.")
+            print(f"  model:   {model_zip_path}")
+            print(f"  results: {RL_RESULTS_JSON}")
+            print(f"  optimal: {OPT_FREQ_CSV}")
+            return
+
     print("10_rl: завантажуємо baseline-артефакти...")
+    print(
+        "10_rl: конфіг "
+        f"use_subproc={USE_SUBPROC} n_envs={N_ENVS} max_steps={MAX_STEPS} "
+        f"total_timesteps={TOTAL_TIMESTEPS}"
+    )
     index_df = pd.read_csv(ACCESSIBILITY_INDEX)
     catchment = pd.read_parquet(CATCHMENT_BUILDINGS)
     entropy = pd.read_parquet(FACILITY_ENTROPY)
     weights = pd.read_parquet(BUILDING_WEIGHTS, columns=["building_id", "weight_wb"])
     easyway = pd.read_csv(EASYWAY_ROUTES)
+    print(
+        f"10_rl: index={len(index_df):,} catchment={len(catchment):,} "
+        f"entropy={len(entropy):,} weights={len(weights):,} easyway={len(easyway):,}"
+    )
 
     index_df["facility_id"] = index_df["facility_id"].astype(str)
     catchment["facility_id"] = catchment["facility_id"].astype(str)
@@ -134,6 +173,7 @@ def run() -> None:
     )
     route_stats = route_stats.merge(route_peak_mean, on="route_id", how="left")
     route_stats["mean_I_peak"] = pd.to_numeric(route_stats["mean_I_peak"], errors="coerce").fillna(0.0)
+    print(f"10_rl: маршрутів у графі = {len(route_stats):,}")
 
     route_stops = easyway.groupby("route_id")["stop_id"].apply(set).to_dict()
     route_ids = route_stats["route_id"].tolist()
@@ -162,6 +202,7 @@ def run() -> None:
         )
     else:
         edge_index = torch.empty((2, 0), dtype=torch.long)
+    print(f"10_rl: ребер у графі = {len(edge_pairs):,}")
 
     catchment = catchment.merge(weights, on="building_id", how="left")
     catchment["weight_wb"] = pd.to_numeric(catchment["weight_wb"], errors="coerce").fillna(1.0).clip(lower=1.0)
@@ -200,7 +241,7 @@ def run() -> None:
             self.route_ids = route_ids
             self.route_types = route_stats["transport_type"].to_numpy(dtype=int)
             self.initial_freq = route_stats["current_freq"].round().clip(lower=0, upper=12).to_numpy(dtype=int)
-            self.max_steps = 50
+            self.max_steps = MAX_STEPS
 
             self.initial_budget = {
                 int(tt): int(self.initial_freq[self.route_types == tt].sum())
@@ -274,29 +315,34 @@ def run() -> None:
             action_type = int(action % 2)
             transport_type = int(self.route_types[route_idx])
 
+            invalid_action = False
+
             if action_type == 0:
                 if self.budget.get(transport_type, 0) <= 0:
-                    return self._get_obs(), -1.0, False, False, {}
-                if self.current_freq[route_idx] >= 12:
-                    return self._get_obs(), -1.0, False, False, {}
-                if not self.active[route_idx]:
-                    self.active[route_idx] = 1
-                self.current_freq[route_idx] += 1
-                self.budget[transport_type] -= 1
+                    invalid_action = True
+                elif self.current_freq[route_idx] >= 12:
+                    invalid_action = True
+                else:
+                    if not self.active[route_idx]:
+                        self.active[route_idx] = 1
+                    self.current_freq[route_idx] += 1
+                    self.budget[transport_type] -= 1
             else:
                 if self.current_freq[route_idx] <= 0:
-                    return self._get_obs(), -1.0, False, False, {}
-                self.current_freq[route_idx] -= 1
-                self.budget[transport_type] += 1
-                if self.current_freq[route_idx] == 0:
-                    self.active[route_idx] = 0
+                    invalid_action = True
+                else:
+                    self.current_freq[route_idx] -= 1
+                    self.budget[transport_type] += 1
+                    if self.current_freq[route_idx] == 0:
+                        self.active[route_idx] = 0
 
-            affected = facilities_by_route.get(route_idx, set())
-            for fid in affected:
-                self.I_peak[fid] = self._recalc_I(fid)
+            if not invalid_action:
+                affected = facilities_by_route.get(route_idx, set())
+                for fid in affected:
+                    self.I_peak[fid] = self._recalc_I(fid)
 
             new_mean = float(np.mean(list(self.I_peak.values()))) if self.I_peak else 0.0
-            reward = new_mean - self.prev_mean
+            reward = -1.0 if invalid_action else (new_mean - self.prev_mean)
             self.prev_mean = new_mean
 
             self.step_count += 1
@@ -327,7 +373,13 @@ def run() -> None:
                 self.history.append(float(np.mean(rewards)))
 
             if self.n_calls % self.log_every == 0 and self.history:
-                print(f"10_rl: step={self.n_calls} mean_reward={np.mean(self.history[-self.log_every:]):.6f}")
+                recent = self.history[-min(len(self.history), self.log_every):]
+                progress_pct = (100.0 * self.num_timesteps / TOTAL_TIMESTEPS) if TOTAL_TIMESTEPS > 0 else 0.0
+                print(
+                    f"10_rl: learn progress={progress_pct:.1f}% "
+                    f"calls={self.n_calls} timesteps={self.num_timesteps} "
+                    f"mean_reward={np.mean(recent):.6f}"
+                )
 
             if self.n_calls % self.checkpoint_every == 0:
                 checkpoint_path = CHECKPOINT_DIR / f"ppo_checkpoint_{self.n_calls}"
@@ -337,30 +389,57 @@ def run() -> None:
     def make_env():
         return KyivTransitEnv()
 
-    n_envs = min(16, os.cpu_count() or 1)
-    print(f"10_rl: запускаємо {n_envs} паралельних середовищ.")
-    env = SubprocVecEnv([make_env for _ in range(n_envs)])
+    print("10_rl: створюємо середовище...")
+    if USE_SUBPROC:
+        n_envs = min(N_ENVS, os.cpu_count() or 1)
+        print(f"10_rl: запускаємо {n_envs} паралельних середовищ через SubprocVecEnv.")
+        env = SubprocVecEnv([make_env for _ in range(n_envs)])
+    else:
+        n_envs = N_ENVS
+        print(f"10_rl: запускаємо {n_envs} середовище(ищ) через DummyVecEnv.")
+        env = DummyVecEnv([make_env for _ in range(n_envs)])
+    print("10_rl: середовище створено успішно.")
 
-    model = PPO(
-        "MlpPolicy",
-        env,
-        learning_rate=3e-4,
-        n_steps=50,
-        verbose=1,
+    model_fresh = model_zip_path.exists() and model_zip_path.stat().st_mtime >= max(
+        path.stat().st_mtime for path in required
     )
-    callback = ProgressCallback(log_every=100, checkpoint_every=500)
-    total_timesteps = 5000 * 50
-    model.learn(total_timesteps=total_timesteps, callback=callback)
-    model.save(str(MODEL_PATH))
 
+    if model_fresh:
+        print(f"10_rl: знайдено актуальну модель, підвантажуємо {model_zip_path} і пропускаємо learn().")
+        model = PPO.load(str(MODEL_PATH), env=env)
+        callback = None
+    else:
+        print("10_rl: створюємо PPO модель...")
+        model = PPO(
+            "MlpPolicy",
+            env,
+            learning_rate=LEARNING_RATE,
+            n_steps=PPO_N_STEPS,
+            verbose=1,
+        )
+        print("10_rl: PPO модель створено.")
+        callback = ProgressCallback(log_every=LOG_EVERY, checkpoint_every=CHECKPOINT_EVERY)
+        print(f"10_rl: стартуємо model.learn(total_timesteps={TOTAL_TIMESTEPS})...")
+        model.learn(total_timesteps=TOTAL_TIMESTEPS, callback=callback)
+        print("10_rl: навчання завершено.")
+        model.save(str(MODEL_PATH))
+
+    print("10_rl: запускаємо детерміновану оцінку навченої політики...")
     eval_env = KyivTransitEnv()
     obs, _ = eval_env.reset()
     done = False
     route_deltas = []
+    eval_progress = tqdm(total=eval_env.max_steps, desc="10_rl eval", leave=True)
     while not done:
         action, _ = model.predict(obs, deterministic=True)
         obs, reward, terminated, truncated, _ = eval_env.step(action)
         done = terminated or truncated
+        eval_progress.update(1)
+        eval_progress.set_postfix(
+            step=eval_env.step_count,
+            mean_I_peak=f"{eval_env.prev_mean:.6f}",
+        )
+    eval_progress.close()
 
     optimal_freq = eval_env.current_freq
     for idx, route_id in enumerate(route_ids):
@@ -389,7 +468,7 @@ def run() -> None:
     compare_df["I_peak_after"] = pd.to_numeric(compare_df["I_peak_after"], errors="coerce").fillna(compare_df["I_peak_before"])
 
     def gini(values):
-        arr = pd.to_numeric(values, errors="coerce").dropna().to_numpy(dtype=float)
+        arr = pd.to_numeric(values, errors="coerce").dropna().to_numpy(dtype=float, copy=True)
         if len(arr) == 0 or arr.sum() <= 0:
             return 0.0
         arr.sort()
@@ -416,10 +495,18 @@ def run() -> None:
             "decreased": optimal_freq_df[optimal_freq_df["delta"] < 0][["route_id", "delta"]].to_dict("records"),
             "disabled": optimal_freq_df[optimal_freq_df["optimal_freq"] == 0][["route_id", "delta"]].to_dict("records"),
         },
+        "run_config": {
+            "use_subproc": USE_SUBPROC,
+            "n_envs": n_envs,
+            "max_steps": MAX_STEPS,
+            "total_timesteps": TOTAL_TIMESTEPS,
+            "learning_rate": LEARNING_RATE,
+            "n_steps": PPO_N_STEPS,
+        },
     }
     RL_RESULTS_JSON.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    history = callback.history if callback.history else [0.0]
+    history = callback.history if (callback is not None and callback.history) else [0.0]
     plt.figure(figsize=(10, 4))
     plt.plot(history, color="#1B6B23")
     plt.title("Навчання PPO: середній reward по кроках")

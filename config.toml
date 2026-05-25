@@ -61,8 +61,21 @@ total_offpeak_hours = 8
 # Порогові значення catchment-аналізу (хвилини ходьби)
 threshold_short_min = 10
 threshold_long_min  = 30
+min_transit_min = 1.5
+min_per_stop_span_min = 1.0
 
 [regression]
 test_size    = 0.2
 random_state = 42
 n_estimators = 200        # GradientBoostingRegressor
+
+[rl]
+# Безпечний дебаг-режим за замовчуванням: без subprocess і з 1 env.
+use_subproc = false
+n_envs = 1
+max_steps = 50
+total_timesteps = 50000
+learning_rate = 0.0003
+n_steps = 50
+log_every = 100
+checkpoint_every = 500
