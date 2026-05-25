@@ -66,6 +66,45 @@ def run() -> None:
         route = str(row["route"]).strip()
         return " ".join(part for part in [transport, route] if part)
 
+    def match_trip_times(
+        times_a: list[int],
+        times_b: list[int],
+        min_plausible_transit: float,
+        max_plausible_transit: float = 90.0,
+    ) -> list[tuple[int, int, float]]:
+        """
+        Монотонно вирівнює розклади двох зупинок по часу.
+
+        Замість припущення A[k] -> B[k] шукаємо перший ще не використаний
+        arrival на stop_B, який іде після depart з stop_A і дає правдоподібний
+        час поїздки. Це краще працює для метро й інших маршрутів, де списки
+        schedules можуть мати різну довжину або бути зсунутими.
+        """
+        if not times_a or not times_b:
+            return []
+
+        matches: list[tuple[int, int, float]] = []
+        j = 0
+        len_b = len(times_b)
+
+        for depart_a in times_a:
+            while j < len_b and times_b[j] <= depart_a:
+                j += 1
+
+            k = j
+            while k < len_b:
+                transit_min = (times_b[k] - depart_a) / 60.0
+                if transit_min < min_plausible_transit:
+                    k += 1
+                    continue
+                if transit_min > max_plausible_transit:
+                    break
+                matches.append((depart_a, times_b[k], transit_min))
+                j = k + 1
+                break
+
+        return matches
+
     def dict_to_df(data: dict[str, dict[str, dict[str, object]]]) -> pd.DataFrame:
         return pd.DataFrame(
             [
@@ -161,16 +200,10 @@ def run() -> None:
 
                 stop_span = max(1, idx_b - idx_a)
                 min_plausible_transit = max(MIN_TRANSIT_MIN, MIN_PER_STOP_SPAN_MIN * stop_span)
-                n_trips = min(len(times_a), len(times_b))
-                for trip_idx in range(n_trips):
-                    depart_a = times_a[trip_idx]
-                    arrive_b = times_b[trip_idx]
-                    transit_min = (arrive_b - depart_a) / 60.0
-                    if transit_min <= 0:
-                        continue
-                    if transit_min < min_plausible_transit:
-                        filtered_by_span += 1
-                        continue
+                matches = match_trip_times(times_a, times_b, min_plausible_transit)
+                filtered_by_span += max(0, min(len(times_a), len(times_b)) - len(matches))
+
+                for depart_a, _arrive_b, transit_min in matches:
 
                     if calendar in ("Weekdays", "All Week") and in_peak(depart_a):
                         prev_payload = stop_reachability_peak.setdefault(sid_a, {}).get(sid_b)
