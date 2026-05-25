@@ -86,6 +86,7 @@ def run() -> None:
     PPO_N_STEPS = max(1, int(RL_CFG.get("n_steps", 50)))
     LOG_EVERY = max(1, int(RL_CFG.get("log_every", 100)))
     CHECKPOINT_EVERY = max(1, int(RL_CFG.get("checkpoint_every", 500)))
+    MAX_ROUTE_DELTA = max(1, int(RL_CFG.get("max_route_delta", 3)))
     TARGET_FACILITY_ID_RAW = RL_CFG.get("target_facility_id", "")
     TARGET_FACILITY_ID = str(TARGET_FACILITY_ID_RAW).strip() or None
 
@@ -133,7 +134,7 @@ def run() -> None:
     print(
         "10_rl: конфіг "
         f"use_subproc={USE_SUBPROC} n_envs={N_ENVS} max_steps={MAX_STEPS} "
-        f"total_timesteps={TOTAL_TIMESTEPS}"
+        f"total_timesteps={TOTAL_TIMESTEPS} max_route_delta={MAX_ROUTE_DELTA}"
     )
     index_df = pd.read_csv(ACCESSIBILITY_INDEX)
     global_index_df = index_df.copy()
@@ -453,11 +454,15 @@ def run() -> None:
                     invalid_action = True
                 elif self.current_freq[route_idx] >= 12:
                     invalid_action = True
+                elif self.current_freq[route_idx] >= min(12, self.initial_freq[route_idx] + MAX_ROUTE_DELTA):
+                    invalid_action = True
                 else:
                     self.current_freq[route_idx] += 1
                     self.budget[transport_type] -= 1
             else:
                 if self.current_freq[route_idx] <= 1:
+                    invalid_action = True
+                elif self.current_freq[route_idx] <= max(1, self.initial_freq[route_idx] - MAX_ROUTE_DELTA):
                     invalid_action = True
                 else:
                     self.current_freq[route_idx] -= 1
@@ -474,12 +479,12 @@ def run() -> None:
 
             if TARGET_FACILITY_ID:
                 new_value = float(self.I_peak.get(TARGET_FACILITY_ID, 0.0))
-                reward = -0.1 if invalid_action else (new_value - self.prev_value)
+                reward = -1.0 if invalid_action else (new_value - self.prev_value)
                 self.prev_value = new_value
                 self.current_I_H327 = new_value
             else:
                 new_mean = float(np.mean(list(self.I_peak.values()))) if self.I_peak else 0.0
-                reward = -0.1 if invalid_action else (new_mean - self.prev_mean)
+                reward = -1.0 if invalid_action else (new_mean - self.prev_mean)
                 self.prev_mean = new_mean
 
             self.step_count += 1
@@ -587,19 +592,32 @@ def run() -> None:
     obs, _ = eval_env.reset()
     done = False
     route_deltas = []
+    best_eval_step = 0
+    best_eval_value = float(eval_env.current_I_H327) if TARGET_FACILITY_ID else float(eval_env.prev_mean)
+    best_freq_snapshot = eval_env.current_freq.copy()
     eval_progress = tqdm(total=eval_env.max_steps, desc="10_rl eval", leave=True)
     while not done:
         action, _ = model.predict(obs, deterministic=True)
         obs, reward, terminated, truncated, _ = eval_env.step(action)
         done = terminated or truncated
+        current_eval_value = float(eval_env.current_I_H327) if TARGET_FACILITY_ID else float(eval_env.prev_mean)
+        if current_eval_value > best_eval_value:
+            best_eval_value = current_eval_value
+            best_eval_step = int(eval_env.step_count)
+            best_freq_snapshot = eval_env.current_freq.copy()
         eval_progress.update(1)
         eval_progress.set_postfix(
             step=eval_env.step_count,
             mean_I_peak=f"{(eval_env.current_I_H327 if TARGET_FACILITY_ID else eval_env.prev_mean):.6f}",
         )
     eval_progress.close()
+    if TARGET_FACILITY_ID:
+        print(
+            f"10_rl: найкращий стан для {TARGET_FACILITY_ID} знайдено на кроці {best_eval_step} "
+            f"з I_peak={best_eval_value:.6f}"
+        )
 
-    optimal_freq = eval_env.current_freq
+    optimal_freq = best_freq_snapshot if TARGET_FACILITY_ID else eval_env.current_freq
     for idx, route_id in enumerate(route_ids):
         initial = int(eval_env.initial_freq[idx])
         optimal = int(optimal_freq[idx])
@@ -654,9 +672,14 @@ def run() -> None:
                     )
 
     before_df = index_df[["facility_id", "I_peak"]].rename(columns={"I_peak": "I_peak_before"})
-    after_df = pd.DataFrame(
-        [{"facility_id": fid, "I_peak_after": val} for fid, val in eval_env.I_peak.items()]
-    )
+    if TARGET_FACILITY_ID:
+        after_df = pd.DataFrame(
+            [{"facility_id": TARGET_FACILITY_ID, "I_peak_after": best_eval_value}]
+        )
+    else:
+        after_df = pd.DataFrame(
+            [{"facility_id": fid, "I_peak_after": val} for fid, val in eval_env.I_peak.items()]
+        )
     compare_df = before_df.merge(after_df, on="facility_id", how="left")
     compare_df["I_peak_after"] = pd.to_numeric(compare_df["I_peak_after"], errors="coerce").fillna(compare_df["I_peak_before"])
 
@@ -671,7 +694,7 @@ def run() -> None:
 
     before_mean = float(compare_df["I_peak_before"].mean())
     after_mean = float(compare_df["I_peak_after"].mean())
-    target_after_i_peak = float(eval_env.I_peak.get(TARGET_FACILITY_ID, 0.0)) if TARGET_FACILITY_ID else None
+    target_after_i_peak = best_eval_value if TARGET_FACILITY_ID else None
     global_after_mean = None
     if TARGET_FACILITY_ID:
         before_target = float(global_initial_i_peak.get(TARGET_FACILITY_ID, 0.0))
@@ -704,6 +727,7 @@ def run() -> None:
             "total_timesteps": TOTAL_TIMESTEPS,
             "learning_rate": LEARNING_RATE,
             "n_steps": PPO_N_STEPS,
+            "max_route_delta": MAX_ROUTE_DELTA,
         },
     }
     RL_RESULTS_JSON.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -736,72 +760,172 @@ def run() -> None:
             encoding="utf-8",
         )
 
+    # ── графік 1: крива навчання (reward) ────────────────────────────────────
     history = callback.history if (callback is not None and callback.history) else [0.0]
-    plt.figure(figsize=(10, 4))
-    plt.plot(history, color="#1B6B23")
-    plt.title("Навчання PPO: середній reward по кроках")
-    plt.xlabel("Крок callback")
-    plt.ylabel("Reward")
-    plt.tight_layout()
-    plt.savefig(LEARNING_CURVE_PNG, dpi=150)
-    plt.close()
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.plot(history, color="#BBDEFB", alpha=0.45, linewidth=1, label="Сирий reward")
+    smooth_w = max(1, len(history) // 50)
+    smoothed = pd.Series(history).rolling(smooth_w, min_periods=1).mean()
+    ax.plot(smoothed, color="#1565C0", linewidth=2.2, label=f"Ковзне середнє (вікно={smooth_w})")
+    ax.axhline(0, color="#555", linestyle="--", linewidth=0.9, alpha=0.6)
+    ax.set_title("Крива навчання PPO: середній reward по кроках", fontsize=14, fontweight="bold")
+    ax.set_xlabel("Крок callback", fontsize=12)
+    ax.set_ylabel("Reward", fontsize=12)
+    ax.legend(fontsize=11)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(LEARNING_CURVE_PNG, dpi=150)
+    plt.close(fig)
+
+    # ── графік 2: крива I*_peak(H327) під час навчання ───────────────────────
     if TARGET_FACILITY_ID:
-        target_i_history = callback.target_i_history if (callback is not None and callback.target_i_history) else [float(target_initial_i_peak or 0.0)]
-        plt.figure(figsize=(10, 4))
-        plt.plot(target_i_history, color="#1B6B23")
-        plt.title(f"Навчання PPO: I*_peak({TARGET_FACILITY_ID}) по кроках")
-        plt.xlabel("Крок callback")
-        plt.ylabel(f"I*_peak({TARGET_FACILITY_ID})")
-        plt.tight_layout()
-        plt.savefig(TARGET_LEARNING_CURVE_PNG, dpi=150)
-        plt.close()
+        target_i_history = (
+            callback.target_i_history
+            if (callback is not None and callback.target_i_history)
+            else [float(target_initial_i_peak or 0.0)]
+        )
+        baseline_val = float(target_initial_i_peak or 0.0)
+        fig, ax = plt.subplots(figsize=(12, 5))
+        ax.plot(target_i_history, color="#A5D6A7", alpha=0.45, linewidth=1, label=f"I*_peak({TARGET_FACILITY_ID})")
+        smooth_w2 = max(1, len(target_i_history) // 50)
+        smoothed2 = pd.Series(target_i_history).rolling(smooth_w2, min_periods=1).mean()
+        ax.plot(smoothed2, color="#2E7D32", linewidth=2.2, label="Ковзне середнє")
+        ax.axhline(
+            baseline_val,
+            color="#C62828", linestyle="--", linewidth=1.5,
+            label=f"Базовий рівень: {baseline_val:.6f}",
+        )
+        final_val = float(target_i_history[-1])
+        delta_pct = ((final_val - baseline_val) / baseline_val * 100.0) if baseline_val != 0 else 0.0
+        ax.set_title(
+            f"Навчання PPO: I*_peak({TARGET_FACILITY_ID}) по кроках  "
+            f"(Δ = {delta_pct:+.2f}%)",
+            fontsize=14, fontweight="bold",
+        )
+        ax.set_xlabel("Крок callback", fontsize=12)
+        ax.set_ylabel(f"I*_peak({TARGET_FACILITY_ID})", fontsize=12)
+        ax.legend(fontsize=11)
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(TARGET_LEARNING_CURVE_PNG, dpi=150)
+        plt.close(fig)
 
-    top_changes = optimal_freq_df.reindex(optimal_freq_df["delta"].abs().sort_values(ascending=False).index).head(10)
-    plt.figure(figsize=(10, 5))
-    plt.bar(top_changes["route_id"], top_changes["delta"], color="#EB9328")
-    plt.title("Топ-10 маршрутів за зміною частоти")
-    plt.xlabel("route_id")
-    plt.ylabel("Δ частоти")
-    plt.tight_layout()
-    plt.savefig(TOP_CHANGES_PNG, dpi=150)
-    plt.close()
+    # ── графік 3: топ-10 маршрутів за зміною частоти ─────────────────────────
+    top_changes = (
+        optimal_freq_df
+        .reindex(optimal_freq_df["delta"].abs().sort_values(ascending=False).index)
+        .head(10)
+        .copy()
+    )
+    top_changes["label"] = top_changes.apply(
+        lambda r: f"{r['transport']} {r['route']}", axis=1
+    )
+    bar_colors_global = ["#2E7D32" if d > 0 else "#C62828" for d in top_changes["delta"]]
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    bars = ax.bar(range(len(top_changes)), top_changes["delta"], color=bar_colors_global)
+    ax.set_xticks(range(len(top_changes)))
+    ax.set_xticklabels(top_changes["label"], rotation=40, ha="right", fontsize=10)
+    ax.axhline(0, color="#333", linewidth=0.9)
+    for bar, val in zip(bars, top_changes["delta"]):
+        offset = 0.05 if val >= 0 else -0.18
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + offset,
+            f"{int(val):+d}",
+            ha="center", va="bottom", fontsize=10, fontweight="bold",
+        )
+    ax.set_title("Топ-10 маршрутів за зміною частоти рейсів/год", fontsize=14, fontweight="bold")
+    ax.set_xlabel("Маршрут (вид транспорту + номер)", fontsize=12)
+    ax.set_ylabel("Δ частоти (рейс/год)", fontsize=12)
+    ax.grid(True, axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(TOP_CHANGES_PNG, dpi=150)
+    plt.close(fig)
+
     if TARGET_FACILITY_ID:
-        plt.figure(figsize=(10, 5))
-        plt.bar(top_changes["route_id"].astype(str), top_changes["delta"], color="#EB9328")
-        plt.title(f"Зміни частот маршрутів для {TARGET_FACILITY_ID}")
-        plt.xlabel("route_id")
-        plt.ylabel("Δ частоти")
-        plt.tight_layout()
-        plt.savefig(TARGET_ROUTE_CHANGES_PNG, dpi=150)
-        plt.close()
+        bar_colors_local = ["#2E7D32" if d > 0 else "#C62828" for d in top_changes["delta"]]
+        fig, ax = plt.subplots(figsize=(12, 6))
+        bars = ax.bar(range(len(top_changes)), top_changes["delta"], color=bar_colors_local)
+        ax.set_xticks(range(len(top_changes)))
+        ax.set_xticklabels(top_changes["label"], rotation=40, ha="right", fontsize=10)
+        ax.axhline(0, color="#333", linewidth=0.9)
+        for bar, val in zip(bars, top_changes["delta"]):
+            offset = 0.05 if val >= 0 else -0.18
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + offset,
+                f"{int(val):+d}",
+                ha="center", va="bottom", fontsize=10, fontweight="bold",
+            )
+        ax.set_title(
+            f"Зміни частот маршрутів локальної підмережі {TARGET_FACILITY_ID}",
+            fontsize=14, fontweight="bold",
+        )
+        ax.set_xlabel("Маршрут (вид транспорту + номер)", fontsize=12)
+        ax.set_ylabel("Δ частоти (рейс/год)", fontsize=12)
+        ax.grid(True, axis="y", alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(TARGET_ROUTE_CHANGES_PNG, dpi=150)
+        plt.close(fig)
 
-    plt.figure(figsize=(6, 6))
-    plt.scatter(compare_df["I_peak_before"], compare_df["I_peak_after"], s=12, alpha=0.6, color="#2980B9")
-    max_val = max(compare_df["I_peak_before"].max(), compare_df["I_peak_after"].max())
-    plt.plot([0, max_val], [0, max_val], linestyle="--", color="#333333")
-    plt.xlabel("I*_peak до")
-    plt.ylabel("I*_peak після")
-    plt.title("До vs після оптимізації")
-    plt.tight_layout()
-    plt.savefig(SCATTER_PNG, dpi=150)
-    plt.close()
+    # ── графік 4: scatter до/після по всіх закладах ───────────────────────────
+    max_val = max(float(compare_df["I_peak_before"].max()), float(compare_df["I_peak_after"].max()))
+    fig, ax = plt.subplots(figsize=(7, 7))
+    ax.scatter(
+        compare_df["I_peak_before"], compare_df["I_peak_after"],
+        s=18, alpha=0.5, color="#1565C0", edgecolors="none", label="Заклади",
+    )
+    ax.plot([0, max_val], [0, max_val], linestyle="--", color="#555", linewidth=1.2, label="Без змін")
+    if TARGET_FACILITY_ID:
+        h327_row = compare_df[compare_df["facility_id"] == TARGET_FACILITY_ID]
+        if not h327_row.empty:
+            hx = float(h327_row["I_peak_before"].iloc[0])
+            hy = float(h327_row["I_peak_after"].iloc[0])
+            ax.scatter(hx, hy, s=90, color="#E65100", zorder=5, label=TARGET_FACILITY_ID)
+            ax.annotate(
+                TARGET_FACILITY_ID,
+                xy=(hx, hy), xytext=(8, 4), textcoords="offset points",
+                fontsize=10, color="#E65100", fontweight="bold",
+            )
+    ax.set_xlabel("I*_peak до оптимізації", fontsize=12)
+    ax.set_ylabel("I*_peak після оптимізації", fontsize=12)
+    ax.set_title("Зміна доступності закладів: до vs після", fontsize=14, fontweight="bold")
+    ax.legend(fontsize=11)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(SCATTER_PNG, dpi=150)
+    plt.close(fig)
 
-    plt.figure(figsize=(10, 5))
-    plt.hist(compare_df["I_peak_before"], bins=30, alpha=0.6, label="До", color="#1FFF2E")
-    plt.hist(compare_df["I_peak_after"], bins=30, alpha=0.6, label="Після", color="#FF0000")
-    plt.title("Розподіл I*_peak до/після")
-    plt.xlabel("I*_peak")
-    plt.ylabel("Кількість закладів")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(HIST_PNG, dpi=150)
-    plt.close()
+    # ── графік 5: гістограма розподілу I*_peak до/після ──────────────────────
+    med_before = float(compare_df["I_peak_before"].median())
+    med_after = float(compare_df["I_peak_after"].median())
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.hist(compare_df["I_peak_before"], bins=30, alpha=0.65, label="До", color="#1565C0", edgecolor="white")
+    ax.hist(compare_df["I_peak_after"], bins=30, alpha=0.65, label="Після", color="#E65100", edgecolor="white")
+    ax.axvline(med_before, color="#0D47A1", linestyle="--", linewidth=1.8,
+               label=f"Медіана до: {med_before:.4f}")
+    ax.axvline(med_after, color="#BF360C", linestyle="--", linewidth=1.8,
+               label=f"Медіана після: {med_after:.4f}")
+    ax.set_title(
+        "Розподіл індексу доступності I*_peak до та після оптимізації",
+        fontsize=14, fontweight="bold",
+    )
+    ax.set_xlabel("I*_peak", fontsize=12)
+    ax.set_ylabel("Кількість закладів", fontsize=12)
+    ax.legend(fontsize=11)
+    ax.grid(True, axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(HIST_PNG, dpi=150)
+    plt.close(fig)
 
+    # ── графік 6: scatter очікування до/після для змінених маршрутів H327 ────
     if TARGET_FACILITY_ID:
         wait_plot_rows = []
+        changed_route_set = set(target_changed_routes["route_id"].astype(str))
         for row in catchment.itertuples(index=False):
             route_id = str(getattr(row, "peak_route_id", ""))
-            if route_id not in set(target_changed_routes["route_id"].astype(str)):
+            if route_id not in changed_route_set:
                 continue
             old_wait = getattr(row, "peak_wait_min", np.nan)
             if pd.isna(old_wait):
@@ -812,19 +936,43 @@ def run() -> None:
             base_freq = max(float(base_freq_by_route.get(route_id, 1.0)), 1.0)
             curr_freq = max(float(eval_env.current_freq[route_idx]), 1.0)
             new_wait = float(old_wait) * (base_freq / curr_freq)
-            wait_plot_rows.append({"route_id": route_id, "wait_before": float(old_wait), "wait_after": new_wait})
+            route_label = f"{route_stats[route_stats['route_id'] == route_id]['transport'].values[0]} " \
+                          f"{route_stats[route_stats['route_id'] == route_id]['route'].values[0]}" \
+                          if route_id in route_stats["route_id"].values else route_id
+            wait_plot_rows.append({
+                "route_id": route_id,
+                "route_label": route_label,
+                "wait_before": float(old_wait),
+                "wait_after": new_wait,
+            })
         if wait_plot_rows:
             wait_df = pd.DataFrame(wait_plot_rows)
-            plt.figure(figsize=(6, 6))
-            plt.scatter(wait_df["wait_before"], wait_df["wait_after"], s=12, alpha=0.6, color="#2980B9")
-            max_wait = max(wait_df["wait_before"].max(), wait_df["wait_after"].max())
-            plt.plot([0, max_wait], [0, max_wait], linestyle="--", color="#333333")
-            plt.xlabel("Очікування до")
-            plt.ylabel("Очікування після")
-            plt.title(f"Wait before/after для змінених маршрутів {TARGET_FACILITY_ID}")
-            plt.tight_layout()
-            plt.savefig(TARGET_WAIT_SCATTER_PNG, dpi=150)
-            plt.close()
+            max_wait = max(float(wait_df["wait_before"].max()), float(wait_df["wait_after"].max()))
+            fig, ax = plt.subplots(figsize=(7, 7))
+            ax.scatter(
+                wait_df["wait_before"], wait_df["wait_after"],
+                s=20, alpha=0.6, color="#1565C0", edgecolors="none",
+            )
+            ax.plot([0, max_wait], [0, max_wait], linestyle="--", color="#555",
+                    linewidth=1.2, label="Без змін")
+            improved = (wait_df["wait_after"] < wait_df["wait_before"]).sum()
+            ax.text(
+                0.03, 0.96,
+                f"Покращено будівель: {improved} / {len(wait_df)}",
+                transform=ax.transAxes, fontsize=10, va="top",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="#E3F2FD", alpha=0.8),
+            )
+            ax.set_xlabel("Час очікування до (хв)", fontsize=12)
+            ax.set_ylabel("Час очікування після (хв)", fontsize=12)
+            ax.set_title(
+                f"Час очікування до/після зміни частот\n(маршрути локальної підмережі {TARGET_FACILITY_ID})",
+                fontsize=13, fontweight="bold",
+            )
+            ax.legend(fontsize=11)
+            ax.grid(True, alpha=0.3)
+            fig.tight_layout()
+            fig.savefig(TARGET_WAIT_SCATTER_PNG, dpi=150)
+            plt.close(fig)
 
     gat_model = TransitGAT()
     feature_tensor = torch.tensor(

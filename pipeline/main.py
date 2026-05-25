@@ -25,6 +25,7 @@ STEPS = [
     ("09_index", "pipeline.step_09_accessibility_index_baseline", "Baseline accessibility index"),
     ("09_validate", "pipeline.step_09b_validate_index_baseline", "Baseline accessibility validation"),
     ("10_rl", "pipeline.step_10_graph_rl_baseline", "Baseline graph RL"),
+    ("10b_debug", "pipeline.step_10b_h327_route_debug", "H327 local route schedule debug"),
 ]
 
 STEP_OUTPUTS = {
@@ -89,6 +90,10 @@ STEP_OUTPUTS = {
         PIPELINE_DIR / "data/outputs/rl_H327_training_curve.png",
         PIPELINE_DIR / "data/outputs/rl_H327_route_changes.png",
         PIPELINE_DIR / "data/outputs/rl_H327_wait_before_after_scatter.png",
+    ],
+    "10b_debug": [
+        PIPELINE_DIR / "data/processed/h327_route_schedule_debug.csv",
+        PIPELINE_DIR / "data/processed/h327_route_schedule_stops_debug.csv",
     ],
 }
 
