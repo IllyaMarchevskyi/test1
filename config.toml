@@ -71,6 +71,7 @@ n_estimators = 200        # GradientBoostingRegressor
 
 [rl]
 # Безпечний дебаг-режим за замовчуванням: без subprocess і з 1 env.
+target_facility_id = "H327"
 use_subproc = false
 n_envs = 1
 max_steps = 50

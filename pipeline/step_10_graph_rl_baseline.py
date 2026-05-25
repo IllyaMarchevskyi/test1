@@ -56,6 +56,7 @@ def run() -> None:
     FACILITY_ENTROPY = PROCESSED_DIR / "facility_entropy_baseline.parquet"
     BUILDING_WEIGHTS = PROCESSED_DIR / "building_weights_baseline.parquet"
     EASYWAY_ROUTES = Path("../gtfs_static/easyway_routes.csv")
+    EASYWAY_METRO = Path("../gtfs_static/easyway_metro.csv")
 
     RL_RESULTS_JSON = PROCESSED_DIR / "rl_results.json"
     OPT_FREQ_CSV = PROCESSED_DIR / "optimal_frequencies.csv"
@@ -74,6 +75,8 @@ def run() -> None:
     PPO_N_STEPS = max(1, int(RL_CFG.get("n_steps", 50)))
     LOG_EVERY = max(1, int(RL_CFG.get("log_every", 100)))
     CHECKPOINT_EVERY = max(1, int(RL_CFG.get("checkpoint_every", 500)))
+    TARGET_FACILITY_ID_RAW = RL_CFG.get("target_facility_id", "")
+    TARGET_FACILITY_ID = str(TARGET_FACILITY_ID_RAW).strip() or None
 
     required = [
         ACCESSIBILITY_INDEX,
@@ -98,10 +101,17 @@ def run() -> None:
         SCATTER_PNG,
         HIST_PNG,
     ]
+    cached_target = None
+    if RL_RESULTS_JSON.exists():
+        try:
+            cached_target = json.loads(RL_RESULTS_JSON.read_text(encoding="utf-8")).get("run_config", {}).get("target_facility_id")
+        except Exception:
+            cached_target = None
+
     if all(path.exists() for path in final_outputs):
         outputs_mtime = min(path.stat().st_mtime for path in final_outputs)
         inputs_mtime = max(path.stat().st_mtime for path in required)
-        if outputs_mtime >= inputs_mtime:
+        if outputs_mtime >= inputs_mtime and cached_target == TARGET_FACILITY_ID:
             print("10_rl: кеш RL-результатів уже актуальний, пропускаємо повторне навчання.")
             print(f"  model:   {model_zip_path}")
             print(f"  results: {RL_RESULTS_JSON}")
@@ -118,11 +128,18 @@ def run() -> None:
     catchment = pd.read_parquet(CATCHMENT_BUILDINGS)
     entropy = pd.read_parquet(FACILITY_ENTROPY)
     weights = pd.read_parquet(BUILDING_WEIGHTS, columns=["building_id", "weight_wb"])
-    easyway = pd.read_csv(EASYWAY_ROUTES)
+    easyway_parts = [pd.read_csv(EASYWAY_ROUTES)]
+    if EASYWAY_METRO.exists():
+        easyway_parts.append(pd.read_csv(EASYWAY_METRO))
+    easyway = pd.concat(easyway_parts, ignore_index=True)
     print(
         f"10_rl: index={len(index_df):,} catchment={len(catchment):,} "
         f"entropy={len(entropy):,} weights={len(weights):,} easyway={len(easyway):,}"
     )
+    if TARGET_FACILITY_ID:
+        print(f"10_rl: локальний режим для закладу {TARGET_FACILITY_ID}.")
+    else:
+        print("10_rl: глобальний режим по всіх закладах.")
 
     index_df["facility_id"] = index_df["facility_id"].astype(str)
     catchment["facility_id"] = catchment["facility_id"].astype(str)
@@ -150,6 +167,37 @@ def run() -> None:
     easyway["times"] = easyway["schedules"].apply(parse_schedules)
     easyway["n_departures"] = easyway["times"].apply(len)
 
+    catchment["facility_id"] = catchment["facility_id"].astype(str)
+    catchment["peak_route_id"] = catchment["peak_route_id"].astype(str)
+    catchment["peak_mode"] = catchment["peak_mode"].astype(str)
+
+    local_route_ids: list[str] | None = None
+    if TARGET_FACILITY_ID:
+        target_rows = catchment[catchment["facility_id"] == TARGET_FACILITY_ID].copy()
+        if target_rows.empty:
+            raise ValueError(f"10_rl: не знайдено записів catchment для target_facility_id={TARGET_FACILITY_ID}")
+        route_mask = (
+            target_rows["peak_mode"].eq("transit")
+            & target_rows["peak_route_id"].notna()
+            & target_rows["peak_route_id"].ne("nan")
+            & target_rows["peak_route_id"].ne("")
+        )
+        local_route_ids = sorted(target_rows.loc[route_mask, "peak_route_id"].astype(str).unique().tolist())
+        if not local_route_ids:
+            raise ValueError(
+                f"10_rl: для target_facility_id={TARGET_FACILITY_ID} не знайдено transit-маршрутів у catchment_buildings."
+            )
+        catchment = target_rows
+        index_df = index_df[index_df["facility_id"] == TARGET_FACILITY_ID].copy()
+        entropy = entropy[entropy["facility_id"].astype(str) == TARGET_FACILITY_ID].copy()
+        easyway = easyway[easyway["route_id"].astype(str).isin(local_route_ids)].copy()
+        print(
+            f"10_rl: локальна підмережа = {len(local_route_ids)} маршрут(ів), "
+            f"рядків catchment={len(catchment):,}."
+        )
+    else:
+        catchment = catchment.copy()
+
     route_stats = (
         easyway.groupby("route_id", as_index=False)
         .agg(
@@ -173,6 +221,8 @@ def run() -> None:
     )
     route_stats = route_stats.merge(route_peak_mean, on="route_id", how="left")
     route_stats["mean_I_peak"] = pd.to_numeric(route_stats["mean_I_peak"], errors="coerce").fillna(0.0)
+    if route_stats.empty:
+        raise ValueError("10_rl: після фільтрації не лишилось маршрутів для RL-середовища.")
     print(f"10_rl: маршрутів у графі = {len(route_stats):,}")
 
     route_stops = easyway.groupby("route_id")["stop_id"].apply(set).to_dict()
@@ -208,7 +258,6 @@ def run() -> None:
     catchment["weight_wb"] = pd.to_numeric(catchment["weight_wb"], errors="coerce").fillna(1.0).clip(lower=1.0)
     catchment = catchment.merge(entropy[["facility_id", "Hnorm_peak"]], on="facility_id", how="left")
     catchment["Hnorm_peak"] = pd.to_numeric(catchment["Hnorm_peak"], errors="coerce").fillna(0.0)
-    catchment["peak_route_id"] = catchment["peak_route_id"].astype(str)
 
     facility_rows = {}
     facilities_by_route: dict[int, set[str]] = {}
@@ -400,8 +449,10 @@ def run() -> None:
         env = DummyVecEnv([make_env for _ in range(n_envs)])
     print("10_rl: середовище створено успішно.")
 
-    model_fresh = model_zip_path.exists() and model_zip_path.stat().st_mtime >= max(
-        path.stat().st_mtime for path in required
+    model_fresh = (
+        model_zip_path.exists()
+        and model_zip_path.stat().st_mtime >= max(path.stat().st_mtime for path in required)
+        and cached_target == TARGET_FACILITY_ID
     )
 
     if model_fresh:
@@ -496,6 +547,7 @@ def run() -> None:
             "disabled": optimal_freq_df[optimal_freq_df["optimal_freq"] == 0][["route_id", "delta"]].to_dict("records"),
         },
         "run_config": {
+            "target_facility_id": TARGET_FACILITY_ID,
             "use_subproc": USE_SUBPROC,
             "n_envs": n_envs,
             "max_steps": MAX_STEPS,
