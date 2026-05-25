@@ -271,6 +271,7 @@ def run() -> None:
     initial_i_peak = dict(zip(index_df["facility_id"], pd.to_numeric(index_df["I_peak"], errors="coerce").fillna(0.0)))
     hnorm_by_facility = dict(zip(entropy["facility_id"].astype(str), pd.to_numeric(entropy["Hnorm_peak"], errors="coerce").fillna(0.0)))
     base_freq_by_route = dict(zip(route_stats["route_id"], route_stats["current_freq"]))
+    target_initial_i_peak = float(initial_i_peak.get(TARGET_FACILITY_ID, 0.0)) if TARGET_FACILITY_ID else None
 
     class TransitGAT(torch.nn.Module):
         def __init__(self, in_channels: int = 6, hidden: int = 64, out: int = 32):
@@ -386,9 +387,14 @@ def run() -> None:
                 for fid in affected:
                     self.I_peak[fid] = self._recalc_I(fid)
 
-            new_mean = float(np.mean(list(self.I_peak.values()))) if self.I_peak else 0.0
-            reward = -1.0 if invalid_action else (new_mean - self.prev_mean)
-            self.prev_mean = new_mean
+            if TARGET_FACILITY_ID:
+                new_value = float(self.I_peak.get(TARGET_FACILITY_ID, 0.0))
+                reward = -1.0 if invalid_action else (new_value - self.prev_value)
+                self.prev_value = new_value
+            else:
+                new_mean = float(np.mean(list(self.I_peak.values()))) if self.I_peak else 0.0
+                reward = -1.0 if invalid_action else (new_mean - self.prev_mean)
+                self.prev_mean = new_mean
 
             self.step_count += 1
             terminated = self.step_count >= self.max_steps
@@ -403,6 +409,7 @@ def run() -> None:
             self.step_count = 0
             self.I_peak = initial_i_peak.copy()
             self.prev_mean = float(np.mean(list(self.I_peak.values()))) if self.I_peak else 0.0
+            self.prev_value = float(target_initial_i_peak or 0.0)
             return self._get_obs(), {}
 
     class ProgressCallback(BaseCallback):
