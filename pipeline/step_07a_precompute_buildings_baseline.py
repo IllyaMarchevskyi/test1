@@ -35,7 +35,9 @@ def run() -> None:
     CACHE_STOP_BLD_LONG = f"{PROCESSED_DIR}/stop_to_bld_long_baseline.parquet"
     CACHE_STOP_FAC_EXIT = f"{PROCESSED_DIR}/stop_to_fac_exit_baseline.parquet"
     OSM_EASYWAY_PATH = "../gtfs_static/osm_easyway_data.csv"
+    OSM_EASYWAY_METRO_PATH = "../gtfs_static/osm_easyway_metro_data.csv"
     OSM_STOPS_CSV_PATH = "../gtfs_static/osm_stops.csv"
+    GMETRO_CSV_PATH = "../gtfs_static/gmetro.csv"
 
     os.makedirs(PROCESSED_DIR, exist_ok=True)
 
@@ -68,7 +70,10 @@ def run() -> None:
 
     cache_paths = [CACHE_STOP_BLD_SHORT, CACHE_STOP_BLD_LONG, CACHE_STOP_FAC_EXIT]
     all_cached = all(os.path.exists(path) for path in cache_paths)
-    inputs_mtime = max(os.path.getmtime(OSM_EASYWAY_PATH), os.path.getmtime(OSM_STOPS_CSV_PATH))
+    freshness_inputs = [OSM_EASYWAY_PATH, OSM_STOPS_CSV_PATH]
+    if os.path.exists(OSM_EASYWAY_METRO_PATH) and os.path.exists(GMETRO_CSV_PATH):
+        freshness_inputs.extend([OSM_EASYWAY_METRO_PATH, GMETRO_CSV_PATH])
+    inputs_mtime = max(os.path.getmtime(path) for path in freshness_inputs)
     caches_fresh = all(os.path.getmtime(path) >= inputs_mtime for path in cache_paths if os.path.exists(path))
     if all_cached and caches_fresh:
         stop_bld_short = pd.read_parquet(CACHE_STOP_BLD_SHORT)
@@ -83,20 +88,44 @@ def run() -> None:
         print("Baseline 07a: кеш застарів відносно osm_stops/osm_easyway, перебудовуємо.")
 
     print(f"Завантажуємо місток OSM -> easyway: {OSM_EASYWAY_PATH}")
-    osm_easyway = pd.read_csv(OSM_EASYWAY_PATH, usecols=["osm_id", "stop_id"]).dropna()
-    osm_easyway["osm_id"] = osm_easyway["osm_id"].astype(str)
-    osm_easyway["stop_id"] = osm_easyway["stop_id"].astype(str)
-    osm_easyway = osm_easyway.drop_duplicates(subset=["osm_id", "stop_id"]).reset_index(drop=True)
+    osm_easyway_surface = pd.read_csv(OSM_EASYWAY_PATH, usecols=["osm_id", "stop_id"]).dropna()
+    osm_easyway_surface["osm_id"] = osm_easyway_surface["osm_id"].astype(str)
+    osm_easyway_surface["stop_id"] = osm_easyway_surface["stop_id"].astype(str)
+    osm_easyway_surface = osm_easyway_surface.drop_duplicates(subset=["osm_id", "stop_id"]).reset_index(drop=True)
 
     print(f"Завантажуємо координати зупинок із: {OSM_STOPS_CSV_PATH}")
     osm_stops_raw = pd.read_csv(OSM_STOPS_CSV_PATH)
     osm_stops_raw = osm_stops_raw.dropna(subset=["geometry"]).copy()
     osm_stops_raw["geometry"] = osm_stops_raw["geometry"].map(wkt.loads)
     osm_stops_raw["osm_id"] = osm_stops_raw.index.astype(str)
-    osm_stops = gpd.GeoDataFrame(osm_stops_raw, geometry="geometry", crs="EPSG:4326")
-    osm_stops = osm_stops[osm_stops.geometry.geom_type == "Point"].copy()
-    osm_stops = osm_stops.merge(osm_easyway, on="osm_id", how="inner")
-    osm_stops = osm_stops.drop_duplicates(subset=["osm_id", "stop_id"]).to_crs("EPSG:32636").reset_index(drop=True)
+    osm_stops_surface = gpd.GeoDataFrame(osm_stops_raw, geometry="geometry", crs="EPSG:4326")
+    osm_stops_surface = osm_stops_surface[osm_stops_surface.geometry.geom_type == "Point"].copy()
+    osm_stops_surface = osm_stops_surface.merge(osm_easyway_surface, on="osm_id", how="inner")
+    osm_stops_surface = osm_stops_surface.drop_duplicates(subset=["osm_id", "stop_id"]).reset_index(drop=True)
+
+    stop_frames = [osm_stops_surface]
+    if os.path.exists(OSM_EASYWAY_METRO_PATH) and os.path.exists(GMETRO_CSV_PATH):
+        print(f"Завантажуємо metro-місток: {OSM_EASYWAY_METRO_PATH}")
+        osm_easyway_metro = pd.read_csv(OSM_EASYWAY_METRO_PATH, usecols=["osm_id", "stop_id"]).dropna()
+        osm_easyway_metro["osm_id"] = osm_easyway_metro["osm_id"].astype(str)
+        osm_easyway_metro["stop_id"] = osm_easyway_metro["stop_id"].astype(str)
+        osm_easyway_metro = osm_easyway_metro.drop_duplicates(subset=["osm_id", "stop_id"]).reset_index(drop=True)
+
+        print(f"Завантажуємо координати метро з: {GMETRO_CSV_PATH}")
+        gmetro_raw = pd.read_csv(GMETRO_CSV_PATH).dropna(subset=["geometry"]).copy()
+        gmetro_raw["geometry"] = gmetro_raw["geometry"].map(wkt.loads)
+        gmetro_raw["osm_id"] = gmetro_raw.index.astype(str)
+        gmetro = gpd.GeoDataFrame(gmetro_raw, geometry="geometry", crs="EPSG:4326")
+        gmetro = gmetro[gmetro.geometry.geom_type == "Point"].copy()
+        gmetro = gmetro.merge(osm_easyway_metro, on="osm_id", how="inner")
+        gmetro = gmetro.drop_duplicates(subset=["osm_id", "stop_id"]).reset_index(drop=True)
+        stop_frames.append(gmetro)
+    else:
+        print("Metro-файли не знайдено, 07a_base рахуємо без метро.")
+
+    osm_stops = pd.concat(stop_frames, ignore_index=True)
+    osm_stops = gpd.GeoDataFrame(osm_stops, geometry="geometry", crs="EPSG:4326")
+    osm_stops = osm_stops.drop_duplicates(subset=["stop_id"]).to_crs("EPSG:32636").reset_index(drop=True)
 
     facilities = gpd.GeoDataFrame(
         scores[["facility_id", "facility_type", "name"]].copy(),

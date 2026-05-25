@@ -21,6 +21,7 @@ def run() -> None:
     MIN_PER_STOP_SPAN_MIN = float(cfg["catchment"].get("min_per_stop_span_min", 1.0))
 
     EASYWAY_PATH = "../gtfs_static/easyway_routes.csv"
+    EASYWAY_METRO_PATH = "../gtfs_static/easyway_metro.csv"
     PROCESSED_DIR = "./data/processed"
     CACHE_PEAK = f"{PROCESSED_DIR}/stop_reachability_peak_baseline.parquet"
     CACHE_OFFPEAK = f"{PROCESSED_DIR}/stop_reachability_offpeak_baseline.parquet"
@@ -100,10 +101,20 @@ def run() -> None:
 
     print(f"Baseline 07b: завантажуємо {EASYWAY_PATH}")
     easyway = pd.read_csv(EASYWAY_PATH)
+    if os.path.exists(EASYWAY_METRO_PATH):
+        print(f"Baseline 07b: додаємо метро з {EASYWAY_METRO_PATH}")
+        easyway_metro = pd.read_csv(EASYWAY_METRO_PATH)
+        easyway = pd.concat([easyway, easyway_metro], ignore_index=True)
+    else:
+        print("Baseline 07b: easyway_metro.csv не знайдено, рахуємо без метро.")
     easyway = easyway[easyway["schedules"] != r"\N"].copy()
     easyway["stop_id"] = easyway["stop_id"].astype(str)
     easyway["times"] = easyway["schedules"].apply(parse_schedules)
     print(f"Рядків з розкладом: {len(easyway):,}")
+
+    inputs_for_cache = [EASYWAY_PATH]
+    if os.path.exists(EASYWAY_METRO_PATH):
+        inputs_for_cache.append(EASYWAY_METRO_PATH)
 
     FORCE_RECOMPUTE = False
     caches_ready = (not FORCE_RECOMPUTE) and all(
@@ -111,7 +122,12 @@ def run() -> None:
         for path in [CACHE_PEAK, CACHE_OFFPEAK, CACHE_PEAK_REV, CACHE_OPK_REV, CACHE_WAIT_PEAK, CACHE_WAIT_OFFPEAK]
     )
     if caches_ready:
-        if cached_outputs_valid():
+        outputs_mtime = min(
+            os.path.getmtime(path)
+            for path in [CACHE_PEAK, CACHE_OFFPEAK, CACHE_PEAK_REV, CACHE_OPK_REV, CACHE_WAIT_PEAK, CACHE_WAIT_OFFPEAK]
+        )
+        inputs_mtime = max(os.path.getmtime(path) for path in inputs_for_cache)
+        if outputs_mtime >= inputs_mtime and cached_outputs_valid():
             print("Baseline 07b кеш уже існує, пропускаємо перебудову.")
             return
         print("Baseline 07b: кеш застарілий або неузгоджений, перебудовуємо.")

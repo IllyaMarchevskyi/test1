@@ -49,15 +49,15 @@ def run() -> None:
     buildings_path = "../data/processed/buildings.parquet"
     scores_path = cfg["paths"]["scores"]
     bridge_path = "../gtfs_static/osm_easyway_data.csv"
+    bridge_metro_path = "../gtfs_static/osm_easyway_metro_data.csv"
     osm_stops_path = "../gtfs_static/osm_stops.csv"
+    gmetro_path = "../gtfs_static/gmetro.csv"
 
     required = {
         "catchment_results_baseline": catchment_csv,
         "catchment_buildings_baseline": catchment_buildings_path,
         "buildings": buildings_path,
         "scores": scores_path,
-        "bridge": bridge_path,
-        "osm_stops": osm_stops_path,
     }
     missing = [label for label, path in required.items() if not os.path.exists(path)]
     if missing:
@@ -77,18 +77,51 @@ def run() -> None:
     buildings = gpd.read_parquet(buildings_path, columns=["building_id", "geometry"])
     scores = pd.read_csv(scores_path, usecols=["facility_id", "facility_type", "name", "lat", "lon"])
     facilities = scores[["facility_id", "facility_type", "name", "lat", "lon"]].copy()
-    bridge = pd.read_csv(bridge_path, usecols=["osm_id", "stop_id"]).dropna()
-    bridge["osm_id"] = bridge["osm_id"].astype(str)
-    bridge["stop_id"] = bridge["stop_id"].astype(str)
-    osm_stops_raw = pd.read_csv(osm_stops_path).dropna(subset=["geometry"]).copy()
-    osm_stops_raw["geometry"] = osm_stops_raw["geometry"].map(wkt.loads)
-    osm_stops_raw["osm_id"] = osm_stops_raw.index.astype(str)
-    osm_stops = gpd.GeoDataFrame(osm_stops_raw, geometry="geometry", crs="EPSG:4326")
-    osm_stops = osm_stops[osm_stops.geometry.geom_type == "Point"].copy()
-    osm_stops["lon"] = osm_stops.geometry.x
-    osm_stops["lat"] = osm_stops.geometry.y
-    stop_coords = bridge.merge(osm_stops[["osm_id", "lon", "lat"]], on="osm_id", how="left")[["stop_id", "lon", "lat"]]
-    stop_coords = stop_coords.dropna(subset=["lon", "lat"]).drop_duplicates(subset=["stop_id"]).reset_index(drop=True)
+    stop_coords = None
+    if os.path.exists(bridge_path) and os.path.exists(osm_stops_path):
+        bridge = pd.read_csv(bridge_path, usecols=["osm_id", "stop_id"]).dropna()
+        bridge["osm_id"] = bridge["osm_id"].astype(str)
+        bridge["stop_id"] = bridge["stop_id"].astype(str)
+        osm_stops_raw = pd.read_csv(osm_stops_path).dropna(subset=["geometry"]).copy()
+        osm_stops_raw["geometry"] = osm_stops_raw["geometry"].map(wkt.loads)
+        osm_stops_raw["osm_id"] = osm_stops_raw.index.astype(str)
+        osm_stops_surface = gpd.GeoDataFrame(osm_stops_raw, geometry="geometry", crs="EPSG:4326")
+        osm_stops_surface = osm_stops_surface[osm_stops_surface.geometry.geom_type == "Point"].copy()
+        osm_stops_surface["lon"] = osm_stops_surface.geometry.x
+        osm_stops_surface["lat"] = osm_stops_surface.geometry.y
+        stop_coord_frames = [
+            bridge.merge(
+                osm_stops_surface[["osm_id", "lon", "lat"]],
+                on="osm_id",
+                how="left",
+            )[["stop_id", "lon", "lat"]]
+        ]
+
+        if os.path.exists(bridge_metro_path) and os.path.exists(gmetro_path):
+            bridge_metro = pd.read_csv(bridge_metro_path, usecols=["osm_id", "stop_id"]).dropna()
+            bridge_metro["osm_id"] = bridge_metro["osm_id"].astype(str)
+            bridge_metro["stop_id"] = bridge_metro["stop_id"].astype(str)
+            gmetro_raw = pd.read_csv(gmetro_path).dropna(subset=["geometry"]).copy()
+            gmetro_raw["geometry"] = gmetro_raw["geometry"].map(wkt.loads)
+            gmetro_raw["osm_id"] = gmetro_raw.index.astype(str)
+            gmetro = gpd.GeoDataFrame(gmetro_raw, geometry="geometry", crs="EPSG:4326")
+            gmetro = gmetro[gmetro.geometry.geom_type == "Point"].copy()
+            gmetro["lon"] = gmetro.geometry.x
+            gmetro["lat"] = gmetro.geometry.y
+            stop_coord_frames.append(
+                bridge_metro.merge(
+                    gmetro[["osm_id", "lon", "lat"]],
+                    on="osm_id",
+                    how="left",
+                )[["stop_id", "lon", "lat"]]
+            )
+        else:
+            print("07d_base: metro-місток не знайдено, preview метро-зупинок буде вимкнено.")
+
+        stop_coords = pd.concat(stop_coord_frames, ignore_index=True)
+        stop_coords = stop_coords.dropna(subset=["lon", "lat"]).drop_duplicates(subset=["stop_id"]).reset_index(drop=True)
+    else:
+        print("07d_base: bridge/osm_stops не знайдені, preview зупинок буде вимкнено.")
 
     print(f"  catchment_results:   {len(catchment_results)} закладів")
     print(f"  catchment_buildings: {len(catchment_buildings):,} записів")
@@ -288,6 +321,28 @@ def run() -> None:
             fillOpacity: 0,
             interactive: false,
         }}).addTo(map);
+    }}
+
+    function findFacility(query) {{
+        const q = String(query || '').trim().toLowerCase();
+        if (!q) return null;
+        return MAP_DATA.facilities.find(f => (
+            String(f.id || '').toLowerCase() === q ||
+            String(f.name || '').toLowerCase().includes(q)
+        )) || null;
+    }}
+
+    async function focusFacility(query) {{
+        const facility = findFacility(query);
+        if (!facility) {{
+            alert('Заклад не знайдено. Введіть facility_id або частину назви.');
+            return;
+        }}
+        const map = getMapObject();
+        map.setView([facility.lat, facility.lon], 15);
+        currentFacilityId = facility.id;
+        setFacilityHighlight(facility);
+        await showBuildings(facility.id);
     }}
 
     function showStopPreview(props) {{
@@ -498,6 +553,30 @@ def run() -> None:
     </div>
     """
 
+    search_html = """
+    <div id="facility-search"
+         style="position:fixed;top:10px;left:10px;z-index:1000;
+                background:white;padding:10px 12px;border-radius:6px;
+                box-shadow:0 2px 6px rgba(0,0,0,0.3);
+                font-family:Arial,sans-serif;width:280px">
+      <b style="font-size:13px">Пошук закладу</b><br>
+      <input id="facility-search-input" type="text"
+             placeholder="facility_id або назва"
+             style="margin-top:6px;width:100%;box-sizing:border-box;
+                    padding:6px 8px;border:1px solid #ccc;border-radius:4px;
+                    font-size:12px">
+      <button onclick="focusFacility(document.getElementById('facility-search-input').value)"
+              style="margin-top:8px;width:100%;padding:6px 8px;
+                     background:#2C3E50;color:white;border:none;border-radius:4px;
+                     cursor:pointer;font-size:12px">
+        Знайти і показати
+      </button>
+      <div style="margin-top:6px;font-size:11px;color:#666">
+        Приклад: <code>H0</code>, <code>S435</code> або частина назви
+      </div>
+    </div>
+    """
+
     legend_html = f"""
     <div style="position:fixed;bottom:30px;right:10px;z-index:1000;
                 background:white;padding:10px 14px;border-radius:6px;
@@ -529,6 +608,7 @@ def run() -> None:
 
     m.get_root().script.add_child(Element(js_code))
     m.get_root().html.add_child(Element(tooltip_style_html))
+    m.get_root().html.add_child(Element(search_html))
     m.get_root().html.add_child(Element(switcher_html))
     m.get_root().html.add_child(Element(legend_html))
     m.save(OUT_HTML)
