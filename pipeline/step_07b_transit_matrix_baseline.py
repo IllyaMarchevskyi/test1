@@ -17,7 +17,8 @@ def run() -> None:
 
     warnings.filterwarnings("ignore")
 
-    MIN_TRANSIT_MIN = 1.5
+    MIN_TRANSIT_MIN = float(cfg["catchment"].get("min_transit_min", 1.5))
+    MIN_PER_STOP_SPAN_MIN = float(cfg["catchment"].get("min_per_stop_span_min", 1.0))
 
     EASYWAY_PATH = "../gtfs_static/easyway_routes.csv"
     PROCESSED_DIR = "./data/processed"
@@ -30,6 +31,7 @@ def run() -> None:
 
     os.makedirs(PROCESSED_DIR, exist_ok=True)
     print(f"Baseline 07b: мінімальний transit_min = {MIN_TRANSIT_MIN} хв")
+    print(f"Baseline 07b: мінімум на 1 перегін = {MIN_PER_STOP_SPAN_MIN} хв")
 
     def hhmm_to_sec(value: str) -> int:
         hour, minute = map(int, value.split(":"))
@@ -123,20 +125,26 @@ def run() -> None:
     groups = easyway.groupby(["route_id", "direction", "calendar"])
     print(f"Груп маршрутів: {len(groups)}")
 
+    filtered_by_span = 0
+
     for (_, _, calendar), group in tqdm(groups, total=len(groups), desc="Baseline 07b маршрути"):
         stops = group.sort_values("index")
         stop_list = stops.to_dict("records")
         for i, stop_a in enumerate(stop_list):
             sid_a = str(stop_a["stop_id"])
             times_a = stop_a["times"]
+            idx_a = int(stop_a["index"])
             if not times_a:
                 continue
             for stop_b in stop_list[i + 1:]:
                 sid_b = str(stop_b["stop_id"])
                 times_b = stop_b["times"]
+                idx_b = int(stop_b["index"])
                 if not times_b:
                     continue
 
+                stop_span = max(1, idx_b - idx_a)
+                min_plausible_transit = max(MIN_TRANSIT_MIN, MIN_PER_STOP_SPAN_MIN * stop_span)
                 n_trips = min(len(times_a), len(times_b))
                 for trip_idx in range(n_trips):
                     depart_a = times_a[trip_idx]
@@ -144,7 +152,8 @@ def run() -> None:
                     transit_min = (arrive_b - depart_a) / 60.0
                     if transit_min <= 0:
                         continue
-                    if transit_min < MIN_TRANSIT_MIN:
+                    if transit_min < min_plausible_transit:
+                        filtered_by_span += 1
                         continue
 
                     if calendar in ("Weekdays", "All Week") and in_peak(depart_a):
@@ -309,6 +318,7 @@ def run() -> None:
     print(f"  offpeak:  {len(reach_offpeak):,}")
     print(f"  waitpeak: {len(wait_peak):,}")
     print(f"  waitoff:  {len(wait_offpeak):,}")
+    print(f"  filtered_by_span: {filtered_by_span:,}")
 
 
 if __name__ == "__main__":
