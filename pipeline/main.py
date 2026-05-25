@@ -23,6 +23,7 @@ STEPS = [
     ("08b_base", "pipeline.step_08b_facility_entropy_baseline", "Baseline facility entropy"),
     ("08c_missing_names", "pipeline.step_08c_missing_names_map", "Facilities with missing names map"),
     ("09_index", "pipeline.step_09_accessibility_index_baseline", "Baseline accessibility index"),
+    ("09_validate", "pipeline.step_09b_validate_index_baseline", "Baseline accessibility validation"),
     ("10_rl", "pipeline.step_10_graph_rl_baseline", "Baseline graph RL"),
 ]
 
@@ -68,6 +69,11 @@ STEP_OUTPUTS = {
         PIPELINE_DIR / "data/processed/global_metrics_baseline.json",
         PIPELINE_DIR / "data/processed/car_accessibility_baseline.csv",
         PIPELINE_DIR / "data/processed/kyiv_drive_graph_proj_baseline.pkl",
+    ],
+    "09_validate": [
+        PIPELINE_DIR / "data/processed/accessibility_index_top5_baseline.csv",
+        PIPELINE_DIR / "data/processed/accessibility_index_bottom5_baseline.csv",
+        PIPELINE_DIR / "data/outputs/accessibility_index_extremes_baseline.html",
     ],
     "10_rl": [
         PIPELINE_DIR / "data/processed/rl_results.json",
