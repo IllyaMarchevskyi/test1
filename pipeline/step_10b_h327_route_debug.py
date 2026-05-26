@@ -90,6 +90,28 @@ def run() -> None:
     easyway["times"] = easyway["schedules"].apply(parse_times)
     easyway["n_departures"] = easyway["times"].apply(len)
 
+    route_freq_base = (
+        easyway[easyway["calendar"].str.strip().str.lower() == "weekdays"]
+        .groupby("route_id", as_index=False)
+        .agg(
+            transport=("transport", "first"),
+            total_departures=("n_departures", "sum"),
+        )
+        .reset_index(drop=True)
+    )
+    route_freq_base["current_freq"] = route_freq_base["total_departures"] / 11.0
+    route_freq_base["rl_initial_freq"] = 6.0
+    for _, sub_idx in route_freq_base.groupby("transport").groups.items():
+        raw = np.log1p(route_freq_base.loc[sub_idx, "current_freq"].astype(float))
+        min_raw = float(raw.min())
+        max_raw = float(raw.max())
+        if max_raw > min_raw:
+            scaled = 1.0 + ((raw - min_raw) / (max_raw - min_raw) * 11.0)
+        else:
+            scaled = pd.Series(6.0, index=raw.index)
+        route_freq_base.loc[sub_idx, "rl_initial_freq"] = scaled.round(2)
+    rl_freq_map = dict(zip(route_freq_base["route_id"], route_freq_base["rl_initial_freq"]))
+
     route_df = easyway[easyway["route_id"].isin(local_routes)].copy()
     if route_df.empty:
         raise ValueError("10b_debug: локальні маршрути не знайдені у файлах easyway.")
@@ -181,7 +203,7 @@ def run() -> None:
                     "n_stops": int(group["stop_id"].nunique()),
                     "total_departures": int(group["n_departures"].sum()),
                     "current_freq": float(group["n_departures"].sum() / 11.0),
-                    "rl_initial_freq": int(np.clip(round(group["n_departures"].sum() / 11.0), 1, 12)),
+                    "rl_initial_freq": float(rl_freq_map.get(route_id, 6.0)),
                     "first_stop_name": str(first_stop_row["stop_name"]),
                     "last_stop_name": str(last_stop_row["stop_name"]),
                     "first_time": sec_to_hhmmss(first_time),
@@ -212,7 +234,7 @@ def run() -> None:
     for row in summary_df.itertuples(index=False):
         print(
             f"  {row.route_id} ({row.transport} {row.route}, {row.direction}, {row.calendar}) | "
-            f"current_freq={row.current_freq:.2f} -> rl_initial_freq={int(row.rl_initial_freq)}"
+            f"current_freq={row.current_freq:.2f} -> rl_initial_freq={float(row.rl_initial_freq):.2f}"
         )
 
     suspicious = summary_df[summary_df["issue_flags"].astype(str) != ""].copy()

@@ -74,7 +74,7 @@ n_estimators = 200        # GradientBoostingRegressor
 # target_facility_id = "H327"
 # Якщо потрібно тестувати групу закладів, список нижче має пріоритет
 # над одиночним target_facility_id.
-target_facility_ids = ["H150", "S455", "H472", "H340", "S0"]
+# target_facility_ids = ["H150", "S455", "H472", "H340", "S0"]
 target_facility_id = "H274"
 use_subproc = true
 n_envs = 2

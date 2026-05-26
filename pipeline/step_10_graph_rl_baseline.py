@@ -294,6 +294,7 @@ def run() -> None:
     easyway["route"] = easyway["route"].astype(str)
     easyway["times"] = easyway["schedules"].apply(parse_schedules)
     easyway["n_departures"] = easyway["times"].apply(len)
+    easyway_all = easyway.copy()
 
     catchment["facility_id"] = catchment["facility_id"].astype(str)
     catchment["peak_route_id"] = catchment["peak_route_id"].astype(str)
@@ -331,6 +332,59 @@ def run() -> None:
     else:
         catchment = catchment.copy()
 
+    def build_rl_initial_freq(df: pd.DataFrame) -> pd.DataFrame:
+        route_stats_full = (
+            df.groupby("route_id", as_index=False)
+            .agg(
+                transport=("transport", "first"),
+                route=("route", "first"),
+                n_stops=("stop_id", "nunique"),
+                total_departures=("n_departures", "sum"),
+            )
+            .reset_index(drop=True)
+        )
+        route_stats_full["current_freq"] = (route_stats_full["total_departures"] / 11.0).clip(lower=0.0)
+        route_stats_full["transport_type"] = route_stats_full["transport"].map(route_to_int).fillna(0).astype(int)
+        route_stats_full["active"] = 1
+        route_stats_full["rl_initial_freq"] = 6.0
+
+        # Нормалізуємо частоти окремо по кожному типу транспорту.
+        # Шкала відносна в межах типу: bus/trol/tram/metro не
+        # порівнюються напряму між собою за абсолютною частотою.
+        for transport_name, sub_idx in route_stats_full.groupby("transport").groups.items():
+            raw = np.log1p(route_stats_full.loc[sub_idx, "current_freq"].astype(float))
+            min_raw = float(raw.min())
+            max_raw = float(raw.max())
+            if max_raw > min_raw:
+                scaled = 1.0 + ((raw - min_raw) / (max_raw - min_raw) * 11.0)
+            else:
+                scaled = pd.Series(6.0, index=raw.index)
+            route_stats_full.loc[sub_idx, "rl_initial_freq"] = scaled.round(2)
+
+        print("\n=== Нормалізовані частоти маршрутів по типах транспорту ===")
+        print(f"{'Route':>8} | {'raw_freq':>10} | {'rl_freq':>8} | {'type':>6}")
+        print("-" * 44)
+        top5 = route_stats_full.nlargest(5, "rl_initial_freq")
+        for row in top5.itertuples(index=False):
+            print(
+                f"{str(row.route_id):>8} | "
+                f"{float(row.current_freq):>10.2f} | "
+                f"{float(row.rl_initial_freq):>8.2f} | "
+                f"{str(row.transport):>6}"
+            )
+        print("  ...")
+        bottom5 = route_stats_full.nsmallest(5, "rl_initial_freq")
+        for row in bottom5.itertuples(index=False):
+            print(
+                f"{str(row.route_id):>8} | "
+                f"{float(row.current_freq):>10.2f} | "
+                f"{float(row.rl_initial_freq):>8.2f} | "
+                f"{str(row.transport):>6}"
+            )
+
+        return route_stats_full
+
+    route_stats_full = build_rl_initial_freq(easyway_all)
     route_stats = (
         easyway.groupby("route_id", as_index=False)
         .agg(
@@ -341,10 +395,11 @@ def run() -> None:
         )
         .reset_index(drop=True)
     )
-    route_stats["current_freq"] = (route_stats["total_departures"] / 11.0).clip(lower=0.0)
-    route_stats["transport_type"] = route_stats["transport"].map(route_to_int).fillna(0).astype(int)
-    route_stats["active"] = 1
-    route_stats["rl_initial_freq"] = route_stats["current_freq"].round().clip(lower=1, upper=12).astype(int)
+    route_stats = route_stats.merge(
+        route_stats_full[["route_id", "current_freq", "transport_type", "active", "rl_initial_freq"]],
+        on="route_id",
+        how="left",
+    )
 
     route_peak_mean = (
         catchment[catchment["peak_route_id"].notna()]
@@ -404,7 +459,7 @@ def run() -> None:
 
     initial_i_peak = dict(zip(index_df["facility_id"], pd.to_numeric(index_df["I_peak"], errors="coerce").fillna(0.0)))
     hnorm_by_facility = dict(zip(entropy["facility_id"].astype(str), pd.to_numeric(entropy["Hnorm_peak"], errors="coerce").fillna(0.0)))
-    base_freq_by_route = dict(zip(route_stats["route_id"], route_stats["rl_initial_freq"]))
+    base_freq_by_route = dict(zip(route_stats["route_id"], pd.to_numeric(route_stats["rl_initial_freq"], errors="coerce").fillna(6.0)))
     target_initial_by_facility = {
         fid: float(initial_i_peak.get(fid, 0.0))
         for fid in TARGET_FACILITY_IDS
@@ -440,11 +495,11 @@ def run() -> None:
             super().__init__()
             self.route_ids = route_ids
             self.route_types = route_stats["transport_type"].to_numpy(dtype=int)
-            self.initial_freq = route_stats["rl_initial_freq"].to_numpy(dtype=int)
+            self.initial_freq = route_stats["rl_initial_freq"].to_numpy(dtype=float)
             self.max_steps = MAX_STEPS
 
             self.initial_budget = {
-                int(tt): int(self.initial_freq[self.route_types == tt].sum())
+                int(tt): float(self.initial_freq[self.route_types == tt].sum())
                 for tt in np.unique(self.route_types)
             }
             self.action_space = gym.spaces.Discrete(len(self.route_ids) * 2)
@@ -459,7 +514,7 @@ def run() -> None:
         def _get_obs(self):
             rows = []
             max_budget = max(self.initial_budget.values()) if self.initial_budget else 1
-            max_freq = max(int(self.initial_freq.max()), 1)
+            max_freq = max(float(self.initial_freq.max()), 1.0)
             max_stops = max(int(route_stats["n_stops"].max()), 1)
             max_i = max(float(route_stats["mean_I_peak"].max()), 1e-6)
             for idx in range(len(self.route_ids)):
@@ -523,23 +578,23 @@ def run() -> None:
             invalid_action = False
 
             if action_type == 0:
-                if self.budget.get(transport_type, 0) <= 0:
+                if self.budget.get(transport_type, 0.0) < 1.0:
                     invalid_action = True
-                elif self.current_freq[route_idx] >= 12:
+                elif self.current_freq[route_idx] + 1.0 > 12.0:
                     invalid_action = True
-                elif self.current_freq[route_idx] >= min(12, self.initial_freq[route_idx] + MAX_ROUTE_DELTA):
+                elif self.current_freq[route_idx] + 1.0 > min(12.0, self.initial_freq[route_idx] + float(MAX_ROUTE_DELTA)):
                     invalid_action = True
                 else:
-                    self.current_freq[route_idx] += 1
-                    self.budget[transport_type] -= 1
+                    self.current_freq[route_idx] += 1.0
+                    self.budget[transport_type] -= 1.0
             else:
-                if self.current_freq[route_idx] <= 1:
+                if self.current_freq[route_idx] - 1.0 < 1.0:
                     invalid_action = True
-                elif self.current_freq[route_idx] <= max(1, self.initial_freq[route_idx] - MAX_ROUTE_DELTA):
+                elif self.current_freq[route_idx] - 1.0 < max(1.0, self.initial_freq[route_idx] - float(MAX_ROUTE_DELTA)):
                     invalid_action = True
                 else:
-                    self.current_freq[route_idx] -= 1
-                    self.budget[transport_type] += 1
+                    self.current_freq[route_idx] -= 1.0
+                    self.budget[transport_type] += 1.0
 
             if not invalid_action:
                 if TARGET_MODE:
@@ -695,25 +750,25 @@ def run() -> None:
 
     optimal_freq = best_freq_snapshot if TARGET_MODE else eval_env.current_freq
     if TARGET_MODE:
-        initial_freq_equal = bool(np.array_equal(best_freq_snapshot, eval_env.initial_freq))
+        initial_freq_equal = bool(np.allclose(best_freq_snapshot, eval_env.initial_freq))
         print(
             "10_rl debug: best-state summary | "
             f"step={best_eval_step} "
             f"best_eval_value={best_eval_value:.6f} "
             f"same_as_initial={initial_freq_equal}"
         )
-        changed_count = int(np.sum(best_freq_snapshot != eval_env.initial_freq))
+        changed_count = int(np.sum(~np.isclose(best_freq_snapshot, eval_env.initial_freq)))
         print(f"10_rl debug: best snapshot changed routes = {changed_count}")
 
     for idx, route_id in enumerate(route_ids):
-        initial = int(eval_env.initial_freq[idx])
-        optimal = int(optimal_freq[idx])
+        initial = float(eval_env.initial_freq[idx])
+        optimal = float(optimal_freq[idx])
         route_deltas.append(
             {
                 "route_id": route_id,
-                "initial_freq": initial,
-                "optimal_freq": optimal,
-                "delta": optimal - initial,
+                "initial_freq": round(initial, 2),
+                "optimal_freq": round(optimal, 2),
+                "delta": round(optimal - initial, 2),
                 "transport_type": int(eval_env.route_types[idx]),
                 "transport": route_stats.iloc[idx]["transport"],
                 "route": route_stats.iloc[idx]["route"],

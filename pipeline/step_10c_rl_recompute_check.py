@@ -103,15 +103,29 @@ def run() -> None:
 
     easyway = easyway[easyway["schedules"] != r"\N"].copy()
     easyway["route_id"] = easyway["route_id"].astype(str)
+    easyway["transport"] = easyway["transport"].astype(str)
     easyway["times"] = easyway["schedules"].apply(parse_schedules)
     easyway["n_departures"] = easyway["times"].apply(len)
     route_stats = (
         easyway.groupby("route_id", as_index=False)
-        .agg(total_departures=("n_departures", "sum"))
+        .agg(
+            transport=("transport", "first"),
+            total_departures=("n_departures", "sum"),
+        )
         .reset_index(drop=True)
     )
-    route_stats["base_freq"] = (route_stats["total_departures"] / 11.0).clip(lower=0.0)
-    base_freq_by_route = dict(zip(route_stats["route_id"], route_stats["base_freq"]))
+    route_stats["current_freq"] = (route_stats["total_departures"] / 11.0).clip(lower=0.0)
+    route_stats["rl_initial_freq"] = 6.0
+    for _, sub_idx in route_stats.groupby("transport").groups.items():
+        raw = np.log1p(route_stats.loc[sub_idx, "current_freq"].astype(float))
+        min_raw = float(raw.min())
+        max_raw = float(raw.max())
+        if max_raw > min_raw:
+            scaled = 1.0 + ((raw - min_raw) / (max_raw - min_raw) * 11.0)
+        else:
+            scaled = pd.Series(6.0, index=raw.index)
+        route_stats.loc[sub_idx, "rl_initial_freq"] = scaled.round(2)
+    base_freq_by_route = dict(zip(route_stats["route_id"], route_stats["rl_initial_freq"]))
 
     catchment = catchment.merge(weights, on="building_id", how="left")
     catchment["weight_wb"] = pd.to_numeric(catchment["weight_wb"], errors="coerce").fillna(1.0).clip(lower=1.0)

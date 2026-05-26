@@ -66,7 +66,16 @@ def run() -> None:
         .reset_index(drop=True)
     )
     summary["current_freq"] = summary["total_departures"] / 11.0
-    summary["rl_initial_freq"] = summary["current_freq"].round().clip(lower=1, upper=12).astype(int)
+    summary["rl_initial_freq"] = 6.0
+    for _, sub_idx in summary.groupby("transport").groups.items():
+        raw = np.log1p(summary.loc[sub_idx, "current_freq"].astype(float))
+        min_raw = float(raw.min())
+        max_raw = float(raw.max())
+        if max_raw > min_raw:
+            scaled = 1.0 + ((raw - min_raw) / (max_raw - min_raw) * 11.0)
+        else:
+            scaled = pd.Series(6.0, index=raw.index)
+        summary.loc[sub_idx, "rl_initial_freq"] = scaled.round(2)
     summary = summary.sort_values(
         ["current_freq", "transport", "route", "direction", "route_id"],
         ascending=[False, True, True, True, True],
@@ -81,7 +90,7 @@ def run() -> None:
         print(
             f"  {row.route_id} ({row.transport} {row.route}, {row.direction}) | "
             f"stops={row.n_stops}, departures={row.total_departures}, "
-            f"current_freq={row.current_freq:.2f} -> rl_initial_freq={int(row.rl_initial_freq)}"
+            f"current_freq={row.current_freq:.2f} -> rl_initial_freq={float(row.rl_initial_freq):.2f}"
         )
 
 
