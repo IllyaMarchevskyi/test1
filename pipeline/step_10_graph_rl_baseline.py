@@ -693,6 +693,17 @@ def run() -> None:
         )
 
     optimal_freq = best_freq_snapshot if TARGET_MODE else eval_env.current_freq
+    if TARGET_MODE:
+        initial_freq_equal = bool(np.array_equal(best_freq_snapshot, eval_env.initial_freq))
+        print(
+            "10_rl debug: best-state summary | "
+            f"step={best_eval_step} "
+            f"best_eval_value={best_eval_value:.6f} "
+            f"same_as_initial={initial_freq_equal}"
+        )
+        changed_count = int(np.sum(best_freq_snapshot != eval_env.initial_freq))
+        print(f"10_rl debug: best snapshot changed routes = {changed_count}")
+
     for idx, route_id in enumerate(route_ids):
         initial = int(eval_env.initial_freq[idx])
         optimal = int(optimal_freq[idx])
@@ -771,6 +782,13 @@ def run() -> None:
             fid: float(best_eval_env._recalc_I(fid))
             for fid in TARGET_FACILITY_IDS
         }
+        print("10_rl debug: recomputed target values at best snapshot:")
+        for target_id in TARGET_FACILITY_IDS:
+            print(
+                f"  {target_id}: "
+                f"baseline={float(target_initial_by_facility.get(target_id, 0.0)):.6f} "
+                f"recomputed={float(best_target_i_by_facility.get(target_id, 0.0)):.6f}"
+            )
         after_df = pd.DataFrame(
             [
                 {"facility_id": fid, "I_peak_after": val}
@@ -800,6 +818,12 @@ def run() -> None:
         if TARGET_MODE
         else None
     )
+    if TARGET_MODE:
+        print(
+            "10_rl debug: target-group mean | "
+            f"baseline={float(target_initial_i_peak or 0.0):.6f} "
+            f"after={float(target_after_i_peak or 0.0):.6f}"
+        )
     global_after_mean = None
     if TARGET_MODE:
         before_target_mean = float(np.mean([global_initial_i_peak.get(fid, 0.0) for fid in TARGET_FACILITY_IDS]))
