@@ -229,7 +229,8 @@ def run() -> None:
         popup_html = (
             f"<div style='width:230px;font-family:Arial,sans-serif;font-size:13px'>"
             f"<b style='font-size:14px'>{fac['name'][:55]}</b><br>"
-            f"<span style='color:#666'>{'Лікарня' if is_hosp else 'Школа'}</span>"
+            f"<span style='color:#666'>{'Лікарня' if is_hosp else 'Школа'}</span><br>"
+            f"<span style='color:#666'>ID: {fac['id']}</span>"
             f"<hr style='margin:6px 0'>"
             f"<b>Пік:</b><br>"
             f"&nbsp;Пішки {T_SHORT} хв: <b>{fac['stats']['peak_walk_short']:,}</b><br>"
