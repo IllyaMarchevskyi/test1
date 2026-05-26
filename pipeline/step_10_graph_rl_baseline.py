@@ -470,20 +470,65 @@ def run() -> None:
     catchment = catchment.merge(entropy[["facility_id", "Hnorm_peak"]], on="facility_id", how="left")
     catchment["Hnorm_peak"] = pd.to_numeric(catchment["Hnorm_peak"], errors="coerce").fillna(0.0)
 
-    facility_rows = {}
-    facilities_by_route: dict[int, set[str]] = {}
-    for row in catchment.itertuples(index=False):
-        fid = str(row.facility_id)
-        facility_rows.setdefault(fid, []).append(row)
-        rid = str(row.peak_route_id)
-        if rid and rid != "nan" and rid in route_index:
-            facilities_by_route.setdefault(route_index[rid], set()).add(fid)
-
-    target_facility_set = set(TARGET_FACILITY_IDS)
-
     initial_i_peak = dict(zip(index_df["facility_id"], pd.to_numeric(index_df["I_peak"], errors="coerce").fillna(0.0)))
     hnorm_by_facility = dict(zip(entropy["facility_id"].astype(str), pd.to_numeric(entropy["Hnorm_peak"], errors="coerce").fillna(0.0)))
     base_freq_by_route = dict(zip(route_stats["route_id"], pd.to_numeric(route_stats["rl_initial_freq"], errors="coerce").fillna(6.0)))
+    base_freq_by_idx = np.array(
+        [
+            max(float(base_freq_by_route.get(route_id, 1.0)), 1.0)
+            for route_id in route_ids
+        ],
+        dtype=np.float32,
+    )
+
+    catchment["_route_idx"] = catchment["peak_route_id"].astype(str).map(route_index)
+    catchment["_is_transit_route"] = (
+        catchment["peak_mode"].eq("transit")
+        & catchment["_route_idx"].notna()
+        & catchment["peak_wait_min"].notna()
+    )
+    numeric_cols = [
+        "peak_total_min",
+        "peak_wait_min",
+        "peak_walk_in_min",
+        "peak_transit_min",
+        "peak_walk_out_min",
+        "weight_wb",
+    ]
+    for col in numeric_cols:
+        catchment[col] = pd.to_numeric(catchment[col], errors="coerce")
+
+    facility_arrays: dict[str, dict[str, np.ndarray | float]] = {}
+    facilities_by_route: dict[int, set[str]] = {}
+    for fid, group in catchment.groupby("facility_id", sort=False):
+        valid = group["peak_total_min"].notna().to_numpy()
+        if not valid.any():
+            continue
+
+        group_valid = group.loc[valid]
+        route_idx = group_valid["_route_idx"].fillna(-1).to_numpy(dtype=np.int32)
+        is_transit = group_valid["_is_transit_route"].to_numpy(dtype=bool)
+        for idx in np.unique(route_idx[route_idx >= 0]):
+            facilities_by_route.setdefault(int(idx), set()).add(str(fid))
+
+        facility_arrays[str(fid)] = {
+            "total": group_valid["peak_total_min"].to_numpy(dtype=np.float32),
+            "wait": group_valid["peak_wait_min"].fillna(0.0).to_numpy(dtype=np.float32),
+            "walk_in": group_valid["peak_walk_in_min"].fillna(0.0).to_numpy(dtype=np.float32),
+            "transit": group_valid["peak_transit_min"].fillna(0.0).to_numpy(dtype=np.float32),
+            "walk_out": group_valid["peak_walk_out_min"].fillna(0.0).to_numpy(dtype=np.float32),
+            "weight": group_valid["weight_wb"].fillna(1.0).to_numpy(dtype=np.float32),
+            "route_idx": route_idx,
+            "is_transit": is_transit,
+            "hnorm": float(hnorm_by_facility.get(str(fid), 0.0)),
+        }
+
+    target_facility_set = set(TARGET_FACILITY_IDS)
+    transfer_action_affected = [
+        facilities_by_route.get(donor_idx, set())
+        | facilities_by_route.get(receiver_idx, set())
+        for donor_idx, receiver_idx in transfer_actions
+    ]
     target_initial_by_facility = {
         fid: float(initial_i_peak.get(fid, 0.0))
         for fid in TARGET_FACILITY_IDS
@@ -552,47 +597,57 @@ def run() -> None:
             return np.array(rows, dtype=np.float32)
 
         def _recalc_I(self, facility_id: str) -> float:
-            rows = facility_rows.get(facility_id, [])
-            if not rows:
+            data = facility_arrays.get(facility_id)
+            if data is None:
                 return 0.0
 
-            weighted_sum = 0.0
-            for row in rows:
-                total_min = getattr(row, "peak_total_min", np.nan)
-                if pd.isna(total_min):
-                    continue
+            total = data["total"]
+            adjusted_total = np.array(total, dtype=np.float32, copy=True)
+            route_idx = data["route_idx"]
+            transit_mask = data["is_transit"]
 
-                route_id = str(getattr(row, "peak_route_id", ""))
-                wait_min = getattr(row, "peak_wait_min", np.nan)
-                walk_in = getattr(row, "peak_walk_in_min", np.nan)
-                transit_min = getattr(row, "peak_transit_min", np.nan)
-                walk_out = getattr(row, "peak_walk_out_min", np.nan)
-                mode = getattr(row, "peak_mode", None)
-                weight_wb = float(getattr(row, "weight_wb", 1.0))
-
-                adjusted_total = float(total_min)
-                if mode == "transit" and route_id in route_index and pd.notna(wait_min):
-                    idx = route_index[route_id]
-                    base_freq = max(float(base_freq_by_route.get(route_id, 1.0)), 1.0)
-                    current_freq = max(float(self.current_freq[idx]), 0.0)
-                    if current_freq <= 0 or not self.active[idx]:
-                        continue
+            if bool(np.any(transit_mask)):
+                idxs = route_idx[transit_mask]
+                valid = (
+                    (idxs >= 0)
+                    & (self.current_freq[idxs] > 0)
+                    & (self.active[idxs] > 0)
+                )
+                if bool(np.any(valid)):
+                    transit_positions = np.flatnonzero(transit_mask)[valid]
+                    valid_route_idxs = idxs[valid]
                     # Спрощення для локального RL:
                     # середній wait масштабуємо обернено до частоти,
                     # але sigma лишаємо сталою. Тобто міняємо лише
                     # середню компоненту очікування, а не повністю
                     # перебудовуємо розподіл інтервалів.
-                    scaled_wait = float(wait_min) * (base_freq / current_freq)
-                    adjusted_total = (
-                        float(walk_in or 0.0)
+                    scaled_wait = (
+                        data["wait"][transit_positions]
+                        * (base_freq_by_idx[valid_route_idxs] / self.current_freq[valid_route_idxs])
+                    )
+                    adjusted_total[transit_positions] = (
+                        data["walk_in"][transit_positions]
                         + scaled_wait
-                        + float(transit_min or 0.0)
-                        + float(walk_out or 0.0)
+                        + data["transit"][transit_positions]
+                        + data["walk_out"][transit_positions]
                     )
 
-                weighted_sum += weight_wb * float(np.exp(-0.05 * adjusted_total))
+                invalid_positions = np.flatnonzero(transit_mask)[~valid] if "valid" in locals() else []
+                if len(invalid_positions):
+                    keep_mask = np.ones(len(adjusted_total), dtype=bool)
+                    keep_mask[invalid_positions] = False
+                    adjusted_total = adjusted_total[keep_mask]
+                    weights_arr = data["weight"][keep_mask]
+                else:
+                    weights_arr = data["weight"]
+            else:
+                weights_arr = data["weight"]
 
-            return (weighted_sum / total_city_weight) * float(hnorm_by_facility.get(facility_id, 0.0))
+            if len(adjusted_total) == 0:
+                return 0.0
+
+            weighted_sum = float(np.sum(weights_arr * np.exp(-0.05 * adjusted_total)))
+            return (weighted_sum / total_city_weight) * float(data["hnorm"])
 
         def _mean_i_peak(self, facility_ids: set[str] | list[str]) -> float:
             if not facility_ids:
@@ -616,7 +671,8 @@ def run() -> None:
             return self.prev_mean
 
         def step(self, action):
-            donor_idx, receiver_idx = transfer_actions[int(action)]
+            action_idx = int(action)
+            donor_idx, receiver_idx = transfer_actions[action_idx]
             transport_type = int(self.route_types[donor_idx])
 
             invalid_action = False
@@ -636,10 +692,7 @@ def run() -> None:
                 self.current_freq[receiver_idx] += 1.0
 
             if not invalid_action:
-                affected = (
-                    facilities_by_route.get(donor_idx, set())
-                    | facilities_by_route.get(receiver_idx, set())
-                )
+                affected = transfer_action_affected[action_idx]
                 self.affected_facility_ids.update(affected)
                 for fid in affected:
                     self.I_peak[fid] = self._recalc_I(fid)
