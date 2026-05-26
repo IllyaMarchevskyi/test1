@@ -30,6 +30,7 @@ def run() -> None:
     ROUTES_CSV = PROCESSED_DIR / "rl_target_group_routes.csv"
     AFFECTED_CSV = PROCESSED_DIR / "rl_target_group_affected_facilities.csv"
     CANDIDATES_CSV = PROCESSED_DIR / "rl_target_group_candidates.csv"
+    TIME_COMPONENTS_CSV = PROCESSED_DIR / "rl_target_group_time_components.csv"
 
     required = [ACCESSIBILITY_INDEX, CATCHMENT_BUILDINGS, EASYWAY_ROUTES]
     missing = [str(path) for path in required if not path.exists()]
@@ -37,16 +38,20 @@ def run() -> None:
         raise FileNotFoundError(f"Відсутні входи для 10e_group_debug: {missing}")
 
     rl_cfg = cfg.get("rl", {})
+
+    def parse_config_list(value) -> list[str]:
+        if isinstance(value, str):
+            return [part.strip() for part in value.split(",") if part.strip()]
+        if isinstance(value, (list, tuple)):
+            return [str(item).strip() for item in value if str(item).strip()]
+        return []
+
     target_ids_raw = rl_cfg.get("target_facility_ids", [])
-    if isinstance(target_ids_raw, str):
-        target_ids = [part.strip() for part in target_ids_raw.split(",") if part.strip()]
-    elif isinstance(target_ids_raw, (list, tuple)):
-        target_ids = [str(item).strip() for item in target_ids_raw if str(item).strip()]
-    else:
-        target_ids = []
+    target_ids = parse_config_list(target_ids_raw)
     single_target = str(rl_cfg.get("target_facility_id", "")).strip()
     if not target_ids and single_target:
         target_ids = [single_target]
+    excluded_transport_types = set(parse_config_list(rl_cfg.get("exclude_transport_types", [])))
 
     if not target_ids:
         raise ValueError(
@@ -102,6 +107,15 @@ def run() -> None:
             counts[transport] = counts.get(transport, 0) + 1
         return int(sum(count * (count - 1) for count in counts.values()))
 
+    def eligible_routes(route_ids: set[str]) -> set[str]:
+        if not excluded_transport_types:
+            return set(route_ids)
+        return {
+            str(route_id)
+            for route_id in route_ids
+            if route_transport.get(str(route_id), "unknown") not in excluded_transport_types
+        }
+
     def affected_for_routes(route_ids: set[str]) -> set[str]:
         affected: set[str] = set()
         for route_id in route_ids:
@@ -112,9 +126,57 @@ def run() -> None:
     target_routes = set()
     for target_id in target_ids:
         target_routes.update(facility_to_routes.get(target_id, set()))
+    target_routes_all = set(target_routes)
+    target_routes = eligible_routes(target_routes)
     affected = affected_for_routes(target_routes)
     affected.update(target_set)
     non_target_affected = affected - target_set
+
+    numeric_time_cols = [
+        "peak_total_min",
+        "peak_wait_min",
+        "peak_transit_min",
+        "peak_walk_in_min",
+        "peak_walk_out_min",
+    ]
+    for col in numeric_time_cols:
+        catchment[col] = pd.to_numeric(catchment[col], errors="coerce")
+
+    all_time_records = catchment[catchment["peak_total_min"].notna()].copy()
+    time_rows = []
+    facility_time_stats: dict[str, dict[str, float]] = {}
+    for facility_id, group in all_time_records.groupby("facility_id", sort=False):
+        transit_group = group[group["peak_mode"].eq("transit")].copy()
+        source = transit_group if not transit_group.empty else group
+        walk_total = source["peak_walk_in_min"].fillna(0.0) + source["peak_walk_out_min"].fillna(0.0)
+        avg_total = float(source["peak_total_min"].mean())
+        avg_wait = float(source["peak_wait_min"].fillna(0.0).mean())
+        avg_transit = float(source["peak_transit_min"].fillna(0.0).mean())
+        avg_walk = float(walk_total.mean())
+        wait_share = (avg_wait / avg_total) if avg_total > 0.0 else 0.0
+        facility_time_stats[str(facility_id)] = {
+            "avg_total_min": avg_total,
+            "avg_wait_min": avg_wait,
+            "avg_transit_min": avg_transit,
+            "avg_walk_min": avg_walk,
+            "wait_share_pct": wait_share * 100.0,
+        }
+        if str(facility_id) in target_set:
+            time_rows.append(
+                {
+                    "facility_id": str(facility_id),
+                    "records": int(len(group)),
+                    "transit_records": int(len(transit_group)),
+                    "avg_total_min": avg_total,
+                    "avg_walk_min": avg_walk,
+                    "avg_wait_min": avg_wait,
+                    "avg_transit_min": avg_transit,
+                    "wait_share_pct": wait_share * 100.0,
+                }
+            )
+
+    time_components_df = pd.DataFrame(time_rows).sort_values("wait_share_pct", ascending=False)
+    time_components_df.to_csv(TIME_COMPONENTS_CSV, index=False, encoding="utf-8")
 
     route_rows = []
     for route_id in sorted(target_routes):
@@ -149,22 +211,27 @@ def run() -> None:
     candidate_rows = []
     for row in index_df.itertuples(index=False):
         facility_id = str(row.facility_id)
-        routes = facility_to_routes.get(facility_id, set())
+        routes = eligible_routes(facility_to_routes.get(facility_id, set()))
         if not routes:
             continue
         facility_affected = affected_for_routes(routes)
         pairs = action_pairs_for_routes(routes)
         transports = sorted({route_transport.get(route_id, "unknown") for route_id in routes})
+        time_stats = facility_time_stats.get(facility_id, {})
         candidate_rows.append(
             {
                 "facility_id": facility_id,
                 "name": str(row.name),
                 "I_peak": float(row.I_peak),
                 "local_route_count": len(routes),
+                "metro_route_count": sum(1 for route_id in routes if route_transport.get(route_id) == "metro"),
                 "transport_types": ",".join(transports),
                 "transfer_action_pairs": pairs,
                 "affected_facilities_count": len(facility_affected),
                 "non_target_affected_count": max(0, len(facility_affected) - 1),
+                "avg_total_min": time_stats.get("avg_total_min"),
+                "avg_wait_min": time_stats.get("avg_wait_min"),
+                "wait_share_pct": time_stats.get("wait_share_pct"),
                 # Високий score = є простір дій і зміна зачіпає не тільки один заклад.
                 "candidate_score": float(pairs + np.log1p(max(0, len(facility_affected) - 1))),
             }
@@ -185,13 +252,32 @@ def run() -> None:
         "target_mean_I_peak": (
             float(target_index["I_peak"].mean()) if not target_index.empty else None
         ),
+        "exclude_transport_types": sorted(excluded_transport_types),
+        "local_routes_all_count": len(target_routes_all),
         "local_routes_count": len(target_routes),
+        "metro_routes_count": int(sum(1 for route_id in target_routes if route_transport.get(route_id) == "metro")),
         "transfer_action_pairs": action_pairs_for_routes(target_routes),
         "affected_facilities_count": len(affected),
         "non_target_affected_count": len(non_target_affected),
+        "avg_total_min": (
+            float(time_components_df["avg_total_min"].mean()) if not time_components_df.empty else None
+        ),
+        "avg_wait_min": (
+            float(time_components_df["avg_wait_min"].mean()) if not time_components_df.empty else None
+        ),
+        "avg_walk_min": (
+            float(time_components_df["avg_walk_min"].mean()) if not time_components_df.empty else None
+        ),
+        "avg_transit_min": (
+            float(time_components_df["avg_transit_min"].mean()) if not time_components_df.empty else None
+        ),
+        "wait_share_pct": (
+            float(time_components_df["wait_share_pct"].mean()) if not time_components_df.empty else None
+        ),
         "routes_csv": str(ROUTES_CSV),
         "affected_csv": str(AFFECTED_CSV),
         "candidates_csv": str(CANDIDATES_CSV),
+        "time_components_csv": str(TIME_COMPONENTS_CSV),
     }
     SUMMARY_JSON.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -201,11 +287,13 @@ def run() -> None:
         f"routes={summary['local_routes_count']} "
         f"actions={summary['transfer_action_pairs']} "
         f"affected={summary['affected_facilities_count']} "
-        f"non_target={summary['non_target_affected_count']}"
+        f"non_target={summary['non_target_affected_count']} "
+        f"wait_share={float(summary['wait_share_pct'] or 0.0):.1f}%"
     )
     print(f"10e_group_debug: routes -> {ROUTES_CSV}")
     print(f"10e_group_debug: affected -> {AFFECTED_CSV}")
     print(f"10e_group_debug: candidates -> {CANDIDATES_CSV}")
+    print(f"10e_group_debug: time components -> {TIME_COMPONENTS_CSV}")
 
 
 if __name__ == "__main__":

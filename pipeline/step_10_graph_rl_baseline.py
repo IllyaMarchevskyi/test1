@@ -96,23 +96,20 @@ def run() -> None:
     NON_TARGET_HARM_WEIGHT = float(RL_CFG.get("non_target_harm_weight", 1.0))
     NON_TARGET_HARM_TOLERANCE = max(0.0, float(RL_CFG.get("non_target_harm_tolerance", 0.0)))
     METRIC_EPS = max(0.0, float(RL_CFG.get("metric_epsilon", 1e-9)))
+    TARGET_WAIT_REWARD_WEIGHT = float(RL_CFG.get("target_wait_reward_weight", 0.0))
+
+    def parse_config_list(value) -> list[str]:
+        if isinstance(value, str):
+            return [part.strip() for part in value.split(",") if part.strip()]
+        if isinstance(value, (list, tuple)):
+            return [str(item).strip() for item in value if str(item).strip()]
+        return []
+
+    EXCLUDED_TRANSPORT_TYPES = set(parse_config_list(RL_CFG.get("exclude_transport_types", [])))
     TARGET_FACILITY_ID_RAW = RL_CFG.get("target_facility_id", "")
     TARGET_FACILITY_ID = str(TARGET_FACILITY_ID_RAW).strip() or None
     TARGET_FACILITY_IDS_RAW = RL_CFG.get("target_facility_ids", [])
-    if isinstance(TARGET_FACILITY_IDS_RAW, str):
-        TARGET_FACILITY_IDS = [
-            part.strip()
-            for part in TARGET_FACILITY_IDS_RAW.split(",")
-            if str(part).strip()
-        ]
-    elif isinstance(TARGET_FACILITY_IDS_RAW, (list, tuple)):
-        TARGET_FACILITY_IDS = [
-            str(item).strip()
-            for item in TARGET_FACILITY_IDS_RAW
-            if str(item).strip()
-        ]
-    else:
-        TARGET_FACILITY_IDS = []
+    TARGET_FACILITY_IDS = parse_config_list(TARGET_FACILITY_IDS_RAW)
     if not TARGET_FACILITY_IDS and TARGET_FACILITY_ID:
         TARGET_FACILITY_IDS = [TARGET_FACILITY_ID]
     TARGET_MODE = bool(TARGET_FACILITY_IDS)
@@ -169,6 +166,7 @@ def run() -> None:
             )
     cached_target_ids: list[str] = []
     cached_action_mode = ""
+    cached_run = {}
     if RL_RESULTS_JSON.exists():
         try:
             cached_run = json.loads(RL_RESULTS_JSON.read_text(encoding="utf-8")).get("run_config", {})
@@ -180,14 +178,29 @@ def run() -> None:
         except Exception:
             cached_target_ids = []
             cached_action_mode = ""
+            cached_run = {}
+
+    def cache_config_matches(cached_run: dict) -> bool:
+        cached_excluded = set(parse_config_list(cached_run.get("exclude_transport_types", [])))
+        return (
+            cached_target_ids == TARGET_FACILITY_IDS
+            and cached_action_mode == "redistribution_pair"
+            and int(cached_run.get("max_steps", -1)) == MAX_STEPS
+            and int(cached_run.get("total_timesteps", -1)) == TOTAL_TIMESTEPS
+            and int(cached_run.get("max_route_delta", -1)) == MAX_ROUTE_DELTA
+            and float(cached_run.get("non_target_harm_weight", -1.0)) == NON_TARGET_HARM_WEIGHT
+            and float(cached_run.get("non_target_harm_tolerance", -1.0)) == NON_TARGET_HARM_TOLERANCE
+            and float(cached_run.get("target_wait_reward_weight", -1.0)) == TARGET_WAIT_REWARD_WEIGHT
+            and float(cached_run.get("metric_epsilon", -1.0)) == METRIC_EPS
+            and cached_excluded == EXCLUDED_TRANSPORT_TYPES
+        )
 
     if all(path.exists() for path in final_outputs):
         outputs_mtime = min(path.stat().st_mtime for path in final_outputs)
         inputs_mtime = max(path.stat().st_mtime for path in required)
         if (
             outputs_mtime >= inputs_mtime
-            and cached_target_ids == TARGET_FACILITY_IDS
-            and cached_action_mode == "redistribution_pair"
+            and cache_config_matches(cached_run)
         ):
             print("10_rl: кеш RL-результатів уже актуальний, пропускаємо повторне навчання.")
             print(f"  model:   {model_zip_path}")
@@ -201,7 +214,9 @@ def run() -> None:
         f"use_subproc={USE_SUBPROC} n_envs={N_ENVS} max_steps={MAX_STEPS} "
         f"total_timesteps={TOTAL_TIMESTEPS} max_route_delta={MAX_ROUTE_DELTA} "
         f"non_target_harm_weight={NON_TARGET_HARM_WEIGHT} "
-        f"non_target_harm_tolerance={NON_TARGET_HARM_TOLERANCE}"
+        f"non_target_harm_tolerance={NON_TARGET_HARM_TOLERANCE} "
+        f"target_wait_reward_weight={TARGET_WAIT_REWARD_WEIGHT} "
+        f"exclude_transport_types={sorted(EXCLUDED_TRANSPORT_TYPES)}"
     )
     index_df = pd.read_csv(ACCESSIBILITY_INDEX)
     global_index_df = index_df.copy()
@@ -335,6 +350,19 @@ def run() -> None:
                 f"{TARGET_FACILITY_IDS} не знайдено transit-маршрутів у catchment_buildings."
             )
         easyway = easyway[easyway["route_id"].astype(str).isin(local_route_ids)].copy()
+        if EXCLUDED_TRANSPORT_TYPES:
+            before_routes = easyway["route_id"].nunique()
+            easyway = easyway[~easyway["transport"].isin(EXCLUDED_TRANSPORT_TYPES)].copy()
+            after_routes = easyway["route_id"].nunique()
+            print(
+                "10_rl: виключено типи транспорту "
+                f"{sorted(EXCLUDED_TRANSPORT_TYPES)}: маршрутів {before_routes} -> {after_routes}."
+            )
+            if easyway.empty:
+                raise ValueError(
+                    "10_rl: після exclude_transport_types не лишилось маршрутів для RL."
+                )
+            local_route_ids = sorted(easyway["route_id"].astype(str).unique().tolist())
         print(
             f"10_rl: локальна підмережа = {len(local_route_ids)} маршрут(ів), "
             f"цільових закладів={len(TARGET_FACILITY_IDS)}, "
@@ -342,6 +370,14 @@ def run() -> None:
         )
     else:
         catchment = catchment.copy()
+        if EXCLUDED_TRANSPORT_TYPES:
+            before_routes = easyway["route_id"].nunique()
+            easyway = easyway[~easyway["transport"].isin(EXCLUDED_TRANSPORT_TYPES)].copy()
+            after_routes = easyway["route_id"].nunique()
+            print(
+                "10_rl: глобально виключено типи транспорту "
+                f"{sorted(EXCLUDED_TRANSPORT_TYPES)}: маршрутів {before_routes} -> {after_routes}."
+            )
 
     def build_rl_initial_freq(df: pd.DataFrame) -> pd.DataFrame:
         route_stats_full = (
@@ -662,6 +698,39 @@ def run() -> None:
         def _target_mean(self) -> float:
             return self._mean_i_peak(TARGET_FACILITY_IDS) if TARGET_MODE else self.prev_mean
 
+        def _facility_wait_saving(self, facility_id: str) -> float:
+            data = facility_arrays.get(facility_id)
+            if data is None:
+                return 0.0
+
+            route_idx = data["route_idx"]
+            transit_mask = data["is_transit"]
+            if not bool(np.any(transit_mask)):
+                return 0.0
+
+            idxs = route_idx[transit_mask]
+            valid = (
+                (idxs >= 0)
+                & (self.current_freq[idxs] > 0)
+                & (self.active[idxs] > 0)
+            )
+            if not bool(np.any(valid)):
+                return 0.0
+
+            transit_positions = np.flatnonzero(transit_mask)[valid]
+            valid_route_idxs = idxs[valid]
+            base_wait = data["wait"][transit_positions]
+            scaled_wait = base_wait * (base_freq_by_idx[valid_route_idxs] / self.current_freq[valid_route_idxs])
+            weights_arr = data["weight"][transit_positions]
+            if float(np.sum(weights_arr)) <= 0.0:
+                return float(np.mean(base_wait - scaled_wait))
+            return float(np.average(base_wait - scaled_wait, weights=weights_arr))
+
+        def _target_wait_saving(self) -> float:
+            if not TARGET_MODE:
+                return 0.0
+            return float(np.mean([self._facility_wait_saving(fid) for fid in TARGET_FACILITY_IDS]))
+
         def _non_target_harm(self) -> float:
             non_target_ids = self.affected_facility_ids - target_facility_set
             if not non_target_ids:
@@ -706,12 +775,18 @@ def run() -> None:
 
             if TARGET_MODE:
                 new_value = self._target_mean()
+                new_wait_saving = self._target_wait_saving()
+                wait_reward = new_wait_saving - self.prev_target_wait_saving
                 non_target_harm = self._non_target_harm()
                 reward = -1.0 if invalid_action else (
-                    (new_value - self.prev_value) - (NON_TARGET_HARM_WEIGHT * non_target_harm)
+                    (new_value - self.prev_value)
+                    + (TARGET_WAIT_REWARD_WEIGHT * wait_reward)
+                    - (NON_TARGET_HARM_WEIGHT * non_target_harm)
                 )
                 self.prev_value = new_value
+                self.prev_target_wait_saving = new_wait_saving
                 self.current_target_i_peak = new_value
+                self.current_target_wait_saving = new_wait_saving
                 self.current_objective_value = self._objective_value()
                 self.current_non_target_harm = non_target_harm
             else:
@@ -735,6 +810,8 @@ def run() -> None:
             self.prev_mean = float(np.mean(list(self.I_peak.values()))) if self.I_peak else 0.0
             self.prev_value = float(target_initial_i_peak or 0.0)
             self.current_target_i_peak = float(target_initial_i_peak or 0.0)
+            self.prev_target_wait_saving = 0.0
+            self.current_target_wait_saving = 0.0
             self.affected_facility_ids: set[str] = set()
             self.current_non_target_harm = 0.0
             self.current_objective_value = self._objective_value()
@@ -747,6 +824,7 @@ def run() -> None:
             self.checkpoint_every = checkpoint_every
             self.history = []
             self.target_i_history = []
+            self.target_wait_history = []
 
         def _on_step(self) -> bool:
             rewards = self.locals.get("rewards")
@@ -757,6 +835,8 @@ def run() -> None:
                 try:
                     current_i = self.training_env.get_attr("current_target_i_peak")[0]
                     self.target_i_history.append(float(current_i))
+                    current_wait = self.training_env.get_attr("current_target_wait_saving")[0]
+                    self.target_wait_history.append(float(current_wait))
                 except Exception:
                     pass
 
@@ -769,7 +849,8 @@ def run() -> None:
                         f"10_rl: learn progress={progress_pct:.1f}% "
                         f"calls={self.n_calls} timesteps={self.num_timesteps} "
                         f"mean_reward={np.mean(recent):.6f} "
-                        f"I_peak({TARGET_LABEL})={current_i:.6f}"
+                        f"I_peak({TARGET_LABEL})={current_i:.6f} "
+                        f"wait_saving={float(self.target_wait_history[-1] if self.target_wait_history else 0.0):.3f}хв"
                     )
                 else:
                     print(
@@ -800,8 +881,7 @@ def run() -> None:
     model_fresh = (
         model_zip_path.exists()
         and model_zip_path.stat().st_mtime >= max(path.stat().st_mtime for path in required)
-        and cached_target_ids == TARGET_FACILITY_IDS
-        and cached_action_mode == "redistribution_pair"
+        and cache_config_matches(cached_run)
     )
 
     if model_fresh:
@@ -950,6 +1030,7 @@ def run() -> None:
         best_eval_env = KyivTransitEnv()
         best_eval_env.reset()
         best_eval_env.current_freq = best_freq_snapshot.copy()
+        target_wait_saving_after = float(best_eval_env._target_wait_saving())
         changed_route_indices = [
             route_index[str(row.route_id)]
             for row in target_changed_routes.itertuples(index=False)
@@ -981,6 +1062,7 @@ def run() -> None:
             ]
         )
     else:
+        target_wait_saving_after = None
         after_df = pd.DataFrame(
             [{"facility_id": fid, "I_peak_after": val} for fid, val in eval_env.I_peak.items()]
         )
@@ -1093,12 +1175,14 @@ def run() -> None:
         "target_facility_ids": TARGET_FACILITY_IDS,
         "before": {
             "I_peak_target_mean": float(target_initial_i_peak) if TARGET_MODE else None,
+            "target_wait_saving_min": 0.0 if TARGET_MODE else None,
             "mean_I_peak": global_initial_mean if TARGET_MODE else before_mean,
             "gini": gini(compare_df["I_peak_before"]),
             "moran": None,
         },
         "after": {
             "I_peak_target_mean": target_after_i_peak if TARGET_MODE else None,
+            "target_wait_saving_min": target_wait_saving_after if TARGET_MODE else None,
             "mean_I_peak": global_after_mean if TARGET_MODE else after_mean,
             "gini": gini(compare_df["I_peak_after"]),
             "moran": None,
@@ -1121,7 +1205,9 @@ def run() -> None:
             "max_route_delta": MAX_ROUTE_DELTA,
             "non_target_harm_weight": NON_TARGET_HARM_WEIGHT,
             "non_target_harm_tolerance": NON_TARGET_HARM_TOLERANCE,
+            "target_wait_reward_weight": TARGET_WAIT_REWARD_WEIGHT,
             "metric_epsilon": METRIC_EPS,
+            "exclude_transport_types": sorted(EXCLUDED_TRANSPORT_TYPES),
             "action_mode": "redistribution_pair",
         },
     }
@@ -1148,6 +1234,7 @@ def run() -> None:
             "target_facility_ids": TARGET_FACILITY_IDS,
             "I_peak_before_mean": float(target_initial_i_peak or 0.0),
             "I_peak_after_mean": float(target_after_i_peak or 0.0),
+            "target_wait_saving_min": target_wait_saving_after,
             "delta": float((target_after_i_peak or 0.0) - (target_initial_i_peak or 0.0)),
             "delta_pct": (
                 float((((target_after_i_peak or 0.0) - (target_initial_i_peak or 0.0)) / target_initial_i_peak) * 100.0)
@@ -1169,6 +1256,7 @@ def run() -> None:
             single_row = per_target_rows[0]
             target_before_after = {
                 **single_row,
+                "target_wait_saving_min": target_wait_saving_after,
                 "routes_considered": route_ids,
                 "routes_changed": {
                     str(row.route_id): round(float(row.delta), 2)

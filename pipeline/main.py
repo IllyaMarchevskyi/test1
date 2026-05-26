@@ -29,6 +29,7 @@ STEPS = [
     ("10c_check", "pipeline.step_10c_rl_recompute_check", "RL baseline vs recompute check"),
     ("10d_debug", "pipeline.step_10d_all_routes_freq_debug", "All routes weekdays frequency debug"),
     ("10e_group_debug", "pipeline.step_10e_target_group_debug", "RL target group debug"),
+    ("10f_action_probe", "pipeline.step_10f_rl_action_probe", "RL one-step action probe"),
 ]
 
 STEP_OUTPUTS = {
@@ -116,6 +117,11 @@ STEP_OUTPUTS = {
         PIPELINE_DIR / "data/processed/rl_target_group_routes.csv",
         PIPELINE_DIR / "data/processed/rl_target_group_affected_facilities.csv",
         PIPELINE_DIR / "data/processed/rl_target_group_candidates.csv",
+        PIPELINE_DIR / "data/processed/rl_target_group_time_components.csv",
+    ],
+    "10f_action_probe": [
+        PIPELINE_DIR / "data/processed/rl_action_probe.csv",
+        PIPELINE_DIR / "data/processed/rl_action_probe_summary.json",
     ],
 }
 
