@@ -67,7 +67,9 @@ def run() -> None:
     RL_RESULTS_JSON = PROCESSED_DIR / "rl_results.json"
     OPT_FREQ_CSV = PROCESSED_DIR / "optimal_frequencies.csv"
     TARGET_BEFORE_AFTER_JSON = PROCESSED_DIR / "target_facility_before_after.json"
+    TARGETS_BEFORE_AFTER_JSON = PROCESSED_DIR / "target_facilities_before_after.json"
     OPT_FREQ_TARGET_CSV = PROCESSED_DIR / "optimal_frequencies_H327.csv"
+    OPT_FREQ_TARGETS_CSV = PROCESSED_DIR / "optimal_frequencies_targets.csv"
     MODEL_PATH = PROCESSED_DIR / "rl_model"
     CHECKPOINT_DIR = PROCESSED_DIR / "rl_checkpoints"
     LEARNING_CURVE_PNG = OUTPUTS_DIR / "rl_learning_curve.png"
@@ -77,6 +79,9 @@ def run() -> None:
     TARGET_LEARNING_CURVE_PNG = OUTPUTS_DIR / "rl_H327_training_curve.png"
     TARGET_ROUTE_CHANGES_PNG = OUTPUTS_DIR / "rl_H327_route_changes.png"
     TARGET_WAIT_SCATTER_PNG = OUTPUTS_DIR / "rl_H327_wait_before_after_scatter.png"
+    TARGETS_LEARNING_CURVE_PNG = OUTPUTS_DIR / "rl_targets_training_curve.png"
+    TARGETS_ROUTE_CHANGES_PNG = OUTPUTS_DIR / "rl_targets_route_changes.png"
+    TARGETS_WAIT_SCATTER_PNG = OUTPUTS_DIR / "rl_targets_wait_before_after_scatter.png"
     RL_CFG = cfg.get("rl", {})
     USE_SUBPROC = bool(RL_CFG.get("use_subproc", False))
     N_ENVS = max(1, int(RL_CFG.get("n_envs", 1)))
@@ -89,6 +94,30 @@ def run() -> None:
     MAX_ROUTE_DELTA = max(1, int(RL_CFG.get("max_route_delta", 3)))
     TARGET_FACILITY_ID_RAW = RL_CFG.get("target_facility_id", "")
     TARGET_FACILITY_ID = str(TARGET_FACILITY_ID_RAW).strip() or None
+    TARGET_FACILITY_IDS_RAW = RL_CFG.get("target_facility_ids", [])
+    if isinstance(TARGET_FACILITY_IDS_RAW, str):
+        TARGET_FACILITY_IDS = [
+            part.strip()
+            for part in TARGET_FACILITY_IDS_RAW.split(",")
+            if str(part).strip()
+        ]
+    elif isinstance(TARGET_FACILITY_IDS_RAW, (list, tuple)):
+        TARGET_FACILITY_IDS = [
+            str(item).strip()
+            for item in TARGET_FACILITY_IDS_RAW
+            if str(item).strip()
+        ]
+    else:
+        TARGET_FACILITY_IDS = []
+    if not TARGET_FACILITY_IDS and TARGET_FACILITY_ID:
+        TARGET_FACILITY_IDS = [TARGET_FACILITY_ID]
+    TARGET_MODE = bool(TARGET_FACILITY_IDS)
+    PRIMARY_TARGET_ID = TARGET_FACILITY_IDS[0] if TARGET_FACILITY_IDS else None
+    TARGET_LABEL = (
+        PRIMARY_TARGET_ID
+        if len(TARGET_FACILITY_IDS) == 1
+        else f"{len(TARGET_FACILITY_IDS)} targets"
+    )
 
     required = [
         ACCESSIBILITY_INDEX,
@@ -113,17 +142,41 @@ def run() -> None:
         SCATTER_PNG,
         HIST_PNG,
     ]
-    cached_target = None
+    if TARGET_MODE:
+        final_outputs.extend(
+            [
+                OPT_FREQ_TARGETS_CSV,
+                TARGETS_BEFORE_AFTER_JSON,
+                TARGETS_LEARNING_CURVE_PNG,
+                TARGETS_ROUTE_CHANGES_PNG,
+                TARGETS_WAIT_SCATTER_PNG,
+            ]
+        )
+        if len(TARGET_FACILITY_IDS) == 1:
+            final_outputs.extend(
+                [
+                    OPT_FREQ_TARGET_CSV,
+                    TARGET_BEFORE_AFTER_JSON,
+                    TARGET_LEARNING_CURVE_PNG,
+                    TARGET_ROUTE_CHANGES_PNG,
+                    TARGET_WAIT_SCATTER_PNG,
+                ]
+            )
+    cached_target_ids: list[str] = []
     if RL_RESULTS_JSON.exists():
         try:
-            cached_target = json.loads(RL_RESULTS_JSON.read_text(encoding="utf-8")).get("run_config", {}).get("target_facility_id")
+            cached_run = json.loads(RL_RESULTS_JSON.read_text(encoding="utf-8")).get("run_config", {})
+            cached_target_ids = cached_run.get("target_facility_ids") or []
+            if not cached_target_ids:
+                cached_single = str(cached_run.get("target_facility_id") or "").strip()
+                cached_target_ids = [cached_single] if cached_single else []
         except Exception:
-            cached_target = None
+            cached_target_ids = []
 
     if all(path.exists() for path in final_outputs):
         outputs_mtime = min(path.stat().st_mtime for path in final_outputs)
         inputs_mtime = max(path.stat().st_mtime for path in required)
-        if outputs_mtime >= inputs_mtime and cached_target == TARGET_FACILITY_ID:
+        if outputs_mtime >= inputs_mtime and cached_target_ids == TARGET_FACILITY_IDS:
             print("10_rl: кеш RL-результатів уже актуальний, пропускаємо повторне навчання.")
             print(f"  model:   {model_zip_path}")
             print(f"  results: {RL_RESULTS_JSON}")
@@ -149,8 +202,14 @@ def run() -> None:
         f"10_rl: index={len(index_df):,} catchment={len(catchment):,} "
         f"entropy={len(entropy):,} weights={len(weights):,} easyway={len(easyway):,}"
     )
-    if TARGET_FACILITY_ID:
-        print(f"10_rl: локальний режим для закладу {TARGET_FACILITY_ID}.")
+    if TARGET_MODE:
+        if len(TARGET_FACILITY_IDS) == 1:
+            print(f"10_rl: локальний режим для закладу {PRIMARY_TARGET_ID}.")
+        else:
+            print(
+                "10_rl: локальний режим для групи закладів: "
+                f"{', '.join(TARGET_FACILITY_IDS)}."
+            )
     else:
         print("10_rl: глобальний режим по всіх закладах.")
 
@@ -241,10 +300,13 @@ def run() -> None:
     catchment["peak_mode"] = catchment["peak_mode"].astype(str)
 
     local_route_ids: list[str] | None = None
-    if TARGET_FACILITY_ID:
-        target_rows = catchment[catchment["facility_id"] == TARGET_FACILITY_ID].copy()
+    if TARGET_MODE:
+        target_rows = catchment[catchment["facility_id"].isin(TARGET_FACILITY_IDS)].copy()
         if target_rows.empty:
-            raise ValueError(f"10_rl: не знайдено записів catchment для target_facility_id={TARGET_FACILITY_ID}")
+            raise ValueError(
+                "10_rl: не знайдено записів catchment для target_facility_ids="
+                f"{TARGET_FACILITY_IDS}"
+            )
         route_mask = (
             target_rows["peak_mode"].eq("transit")
             & target_rows["peak_route_id"].notna()
@@ -254,14 +316,16 @@ def run() -> None:
         local_route_ids = sorted(target_rows.loc[route_mask, "peak_route_id"].astype(str).unique().tolist())
         if not local_route_ids:
             raise ValueError(
-                f"10_rl: для target_facility_id={TARGET_FACILITY_ID} не знайдено transit-маршрутів у catchment_buildings."
+                "10_rl: для target_facility_ids="
+                f"{TARGET_FACILITY_IDS} не знайдено transit-маршрутів у catchment_buildings."
             )
         catchment = target_rows
-        index_df = index_df[index_df["facility_id"] == TARGET_FACILITY_ID].copy()
-        entropy = entropy[entropy["facility_id"].astype(str) == TARGET_FACILITY_ID].copy()
+        index_df = index_df[index_df["facility_id"].isin(TARGET_FACILITY_IDS)].copy()
+        entropy = entropy[entropy["facility_id"].astype(str).isin(TARGET_FACILITY_IDS)].copy()
         easyway = easyway[easyway["route_id"].astype(str).isin(local_route_ids)].copy()
         print(
             f"10_rl: локальна підмережа = {len(local_route_ids)} маршрут(ів), "
+            f"цільових закладів={len(TARGET_FACILITY_IDS)}, "
             f"рядків catchment={len(catchment):,}."
         )
     else:
@@ -340,7 +404,15 @@ def run() -> None:
     initial_i_peak = dict(zip(index_df["facility_id"], pd.to_numeric(index_df["I_peak"], errors="coerce").fillna(0.0)))
     hnorm_by_facility = dict(zip(entropy["facility_id"].astype(str), pd.to_numeric(entropy["Hnorm_peak"], errors="coerce").fillna(0.0)))
     base_freq_by_route = dict(zip(route_stats["route_id"], route_stats["current_freq"]))
-    target_initial_i_peak = float(initial_i_peak.get(TARGET_FACILITY_ID, 0.0)) if TARGET_FACILITY_ID else None
+    target_initial_by_facility = {
+        fid: float(initial_i_peak.get(fid, 0.0))
+        for fid in TARGET_FACILITY_IDS
+    }
+    target_initial_i_peak = (
+        float(np.mean(list(target_initial_by_facility.values())))
+        if TARGET_MODE
+        else None
+    )
     global_initial_i_peak = dict(
         zip(
             global_index_df["facility_id"].astype(str),
@@ -469,19 +541,22 @@ def run() -> None:
                     self.budget[transport_type] += 1
 
             if not invalid_action:
-                if TARGET_FACILITY_ID:
-                    # У локальному режимі перераховуємо лише цільовий заклад.
-                    self.I_peak[TARGET_FACILITY_ID] = self._recalc_I(TARGET_FACILITY_ID)
+                if TARGET_MODE:
+                    # У локальному режимі перераховуємо лише цільову групу закладів.
+                    for target_fid in TARGET_FACILITY_IDS:
+                        self.I_peak[target_fid] = self._recalc_I(target_fid)
                 else:
                     affected = facilities_by_route.get(route_idx, set())
                     for fid in affected:
                         self.I_peak[fid] = self._recalc_I(fid)
 
-            if TARGET_FACILITY_ID:
-                new_value = float(self.I_peak.get(TARGET_FACILITY_ID, 0.0))
+            if TARGET_MODE:
+                new_value = float(
+                    np.mean([self.I_peak.get(fid, 0.0) for fid in TARGET_FACILITY_IDS])
+                )
                 reward = -1.0 if invalid_action else (new_value - self.prev_value)
                 self.prev_value = new_value
-                self.current_I_H327 = new_value
+                self.current_target_i_peak = new_value
             else:
                 new_mean = float(np.mean(list(self.I_peak.values()))) if self.I_peak else 0.0
                 reward = -1.0 if invalid_action else (new_mean - self.prev_mean)
@@ -501,7 +576,7 @@ def run() -> None:
             self.I_peak = initial_i_peak.copy()
             self.prev_mean = float(np.mean(list(self.I_peak.values()))) if self.I_peak else 0.0
             self.prev_value = float(target_initial_i_peak or 0.0)
-            self.current_I_H327 = float(target_initial_i_peak or 0.0)
+            self.current_target_i_peak = float(target_initial_i_peak or 0.0)
             return self._get_obs(), {}
 
     class ProgressCallback(BaseCallback):
@@ -517,9 +592,9 @@ def run() -> None:
             if rewards is not None and len(rewards):
                 self.history.append(float(np.mean(rewards)))
 
-            if TARGET_FACILITY_ID:
+            if TARGET_MODE:
                 try:
-                    current_i = self.training_env.get_attr("current_I_H327")[0]
+                    current_i = self.training_env.get_attr("current_target_i_peak")[0]
                     self.target_i_history.append(float(current_i))
                 except Exception:
                     pass
@@ -527,13 +602,13 @@ def run() -> None:
             if self.n_calls % self.log_every == 0 and self.history:
                 recent = self.history[-min(len(self.history), self.log_every):]
                 progress_pct = (100.0 * self.num_timesteps / TOTAL_TIMESTEPS) if TOTAL_TIMESTEPS > 0 else 0.0
-                if TARGET_FACILITY_ID and self.target_i_history:
+                if TARGET_MODE and self.target_i_history:
                     current_i = self.target_i_history[-1]
                     print(
                         f"10_rl: learn progress={progress_pct:.1f}% "
                         f"calls={self.n_calls} timesteps={self.num_timesteps} "
                         f"mean_reward={np.mean(recent):.6f} "
-                        f"I_peak({TARGET_FACILITY_ID})={current_i:.6f}"
+                        f"I_peak({TARGET_LABEL})={current_i:.6f}"
                     )
                 else:
                     print(
@@ -564,7 +639,7 @@ def run() -> None:
     model_fresh = (
         model_zip_path.exists()
         and model_zip_path.stat().st_mtime >= max(path.stat().st_mtime for path in required)
-        and cached_target == TARGET_FACILITY_ID
+        and cached_target_ids == TARGET_FACILITY_IDS
     )
 
     if model_fresh:
@@ -593,14 +668,14 @@ def run() -> None:
     done = False
     route_deltas = []
     best_eval_step = 0
-    best_eval_value = float(eval_env.current_I_H327) if TARGET_FACILITY_ID else float(eval_env.prev_mean)
+    best_eval_value = float(eval_env.current_target_i_peak) if TARGET_MODE else float(eval_env.prev_mean)
     best_freq_snapshot = eval_env.current_freq.copy()
     eval_progress = tqdm(total=eval_env.max_steps, desc="10_rl eval", leave=True)
     while not done:
         action, _ = model.predict(obs, deterministic=True)
         obs, reward, terminated, truncated, _ = eval_env.step(action)
         done = terminated or truncated
-        current_eval_value = float(eval_env.current_I_H327) if TARGET_FACILITY_ID else float(eval_env.prev_mean)
+        current_eval_value = float(eval_env.current_target_i_peak) if TARGET_MODE else float(eval_env.prev_mean)
         if current_eval_value > best_eval_value:
             best_eval_value = current_eval_value
             best_eval_step = int(eval_env.step_count)
@@ -608,16 +683,16 @@ def run() -> None:
         eval_progress.update(1)
         eval_progress.set_postfix(
             step=eval_env.step_count,
-            mean_I_peak=f"{(eval_env.current_I_H327 if TARGET_FACILITY_ID else eval_env.prev_mean):.6f}",
+            mean_I_peak=f"{(eval_env.current_target_i_peak if TARGET_MODE else eval_env.prev_mean):.6f}",
         )
     eval_progress.close()
-    if TARGET_FACILITY_ID:
+    if TARGET_MODE:
         print(
-            f"10_rl: найкращий стан для {TARGET_FACILITY_ID} знайдено на кроці {best_eval_step} "
+            f"10_rl: найкращий стан для {TARGET_LABEL} знайдено на кроці {best_eval_step} "
             f"з I_peak={best_eval_value:.6f}"
         )
 
-    optimal_freq = best_freq_snapshot if TARGET_FACILITY_ID else eval_env.current_freq
+    optimal_freq = best_freq_snapshot if TARGET_MODE else eval_env.current_freq
     for idx, route_id in enumerate(route_ids):
         initial = int(eval_env.initial_freq[idx])
         optimal = int(optimal_freq[idx])
@@ -635,21 +710,29 @@ def run() -> None:
 
     optimal_freq_df = pd.DataFrame(route_deltas).sort_values("delta", ascending=False).reset_index(drop=True)
     optimal_freq_df.to_csv(OPT_FREQ_CSV, index=False, encoding="utf-8")
-    if TARGET_FACILITY_ID:
+    if TARGET_MODE:
+        optimal_freq_df.to_csv(OPT_FREQ_TARGETS_CSV, index=False, encoding="utf-8")
+    if len(TARGET_FACILITY_IDS) == 1:
         optimal_freq_df.to_csv(OPT_FREQ_TARGET_CSV, index=False, encoding="utf-8")
 
     target_changed_routes = optimal_freq_df[optimal_freq_df["delta"] != 0].copy()
-    if TARGET_FACILITY_ID and SCORES_PATH.exists():
+    if TARGET_MODE and SCORES_PATH.exists():
         scores = pd.read_csv(SCORES_PATH, usecols=["facility_id", "lat", "lon", "name"])
         scores["facility_id"] = scores["facility_id"].astype(str)
-        target_row = scores[scores["facility_id"] == TARGET_FACILITY_ID]
+        target_rows = scores[scores["facility_id"].isin(TARGET_FACILITY_IDS)].copy()
         stop_coords_map = load_stop_coords_map()
 
-        if not target_row.empty and stop_coords_map and not target_changed_routes.empty:
-            facility_lat = float(target_row.iloc[0]["lat"])
-            facility_lon = float(target_row.iloc[0]["lon"])
-            facility_name = str(target_row.iloc[0].get("name", TARGET_FACILITY_ID))
-            print(f"10_rl: маршрути, що змінились для {TARGET_FACILITY_ID} ({facility_name}):")
+        if not target_rows.empty and stop_coords_map and not target_changed_routes.empty:
+            facility_coords = {
+                str(row.facility_id): (float(row.lat), float(row.lon), str(getattr(row, "name", row.facility_id)))
+                for row in target_rows.itertuples(index=False)
+            }
+            target_label_text = (
+                f"{PRIMARY_TARGET_ID} ({facility_coords.get(PRIMARY_TARGET_ID, (None, None, PRIMARY_TARGET_ID))[2]})"
+                if len(TARGET_FACILITY_IDS) == 1 and PRIMARY_TARGET_ID
+                else ", ".join(TARGET_FACILITY_IDS)
+            )
+            print(f"10_rl: маршрути, що змінились для {target_label_text}:")
             for row in target_changed_routes.itertuples(index=False):
                 route_stop_ids = route_stops.get(str(row.route_id), set())
                 distances = []
@@ -658,23 +741,41 @@ def run() -> None:
                     if coords is None:
                         continue
                     stop_lat, stop_lon = coords
-                    distances.append(haversine_m(stop_lat, stop_lon, facility_lat, facility_lon))
+                    for target_id, (facility_lat, facility_lon, facility_name) in facility_coords.items():
+                        distances.append(
+                            (
+                                target_id,
+                                facility_name,
+                                haversine_m(stop_lat, stop_lon, facility_lat, facility_lon),
+                            )
+                        )
                 if distances:
-                    min_dist_m = min(distances)
+                    nearest_target_id, nearest_name, min_dist_m = min(distances, key=lambda item: item[2])
                     print(
                         f"  {row.route_id} ({row.transport} {row.route}): "
-                        f"delta={int(row.delta):+d}, найближча зупинка до {TARGET_FACILITY_ID}: {min_dist_m:.0f}м"
+                        f"delta={int(row.delta):+d}, найближча зупинка до {nearest_target_id} "
+                        f"({nearest_name}): {min_dist_m:.0f}м"
                     )
                 else:
                     print(
                         f"  {row.route_id} ({row.transport} {row.route}): "
-                        f"delta={int(row.delta):+d}, найближча зупинка до {TARGET_FACILITY_ID}: н/д"
+                        f"delta={int(row.delta):+d}, найближча зупинка до target-group: н/д"
                     )
 
     before_df = index_df[["facility_id", "I_peak"]].rename(columns={"I_peak": "I_peak_before"})
-    if TARGET_FACILITY_ID:
+    if TARGET_MODE:
+        best_eval_env = KyivTransitEnv()
+        best_eval_env.reset()
+        best_eval_env.current_freq = best_freq_snapshot.copy()
+        best_target_i_by_facility = {
+            fid: float(best_eval_env._recalc_I(fid))
+            for fid in TARGET_FACILITY_IDS
+        }
         after_df = pd.DataFrame(
-            [{"facility_id": TARGET_FACILITY_ID, "I_peak_after": best_eval_value}]
+            [
+                {"facility_id": fid, "I_peak_after": val}
+                for fid, val in best_target_i_by_facility.items()
+            ]
         )
     else:
         after_df = pd.DataFrame(
@@ -694,23 +795,28 @@ def run() -> None:
 
     before_mean = float(compare_df["I_peak_before"].mean())
     after_mean = float(compare_df["I_peak_after"].mean())
-    target_after_i_peak = best_eval_value if TARGET_FACILITY_ID else None
+    target_after_i_peak = (
+        float(np.mean(list(best_target_i_by_facility.values())))
+        if TARGET_MODE
+        else None
+    )
     global_after_mean = None
-    if TARGET_FACILITY_ID:
-        before_target = float(global_initial_i_peak.get(TARGET_FACILITY_ID, 0.0))
-        global_after_mean = global_initial_mean + ((target_after_i_peak - before_target) / global_n_facilities)
+    if TARGET_MODE:
+        before_target_mean = float(np.mean([global_initial_i_peak.get(fid, 0.0) for fid in TARGET_FACILITY_IDS]))
+        global_after_mean = global_initial_mean + ((target_after_i_peak - before_target_mean) / global_n_facilities)
 
     results = {
-        "target_facility_id": TARGET_FACILITY_ID,
+        "target_facility_id": PRIMARY_TARGET_ID,
+        "target_facility_ids": TARGET_FACILITY_IDS,
         "before": {
-            "I_peak_H327": float(target_initial_i_peak) if TARGET_FACILITY_ID else None,
-            "mean_I_peak": global_initial_mean if TARGET_FACILITY_ID else before_mean,
+            "I_peak_target_mean": float(target_initial_i_peak) if TARGET_MODE else None,
+            "mean_I_peak": global_initial_mean if TARGET_MODE else before_mean,
             "gini": gini(compare_df["I_peak_before"]),
             "moran": None,
         },
         "after": {
-            "I_peak_H327": target_after_i_peak if TARGET_FACILITY_ID else None,
-            "mean_I_peak": global_after_mean if TARGET_FACILITY_ID else after_mean,
+            "I_peak_target_mean": target_after_i_peak if TARGET_MODE else None,
+            "mean_I_peak": global_after_mean if TARGET_MODE else after_mean,
             "gini": gini(compare_df["I_peak_after"]),
             "moran": None,
         },
@@ -720,7 +826,8 @@ def run() -> None:
             "disabled": optimal_freq_df[optimal_freq_df["optimal_freq"] == 0][["route_id", "delta"]].to_dict("records"),
         },
         "run_config": {
-            "target_facility_id": TARGET_FACILITY_ID,
+            "target_facility_id": PRIMARY_TARGET_ID,
+            "target_facility_ids": TARGET_FACILITY_IDS,
             "use_subproc": USE_SUBPROC,
             "n_envs": n_envs,
             "max_steps": MAX_STEPS,
@@ -732,33 +839,61 @@ def run() -> None:
     }
     RL_RESULTS_JSON.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    if TARGET_FACILITY_ID and SCORES_PATH.exists():
+    if TARGET_MODE and SCORES_PATH.exists():
         scores = pd.read_csv(SCORES_PATH, usecols=["facility_id", "name"])
         scores["facility_id"] = scores["facility_id"].astype(str)
-        facility_name = str(
-            scores.loc[scores["facility_id"] == TARGET_FACILITY_ID, "name"].iloc[0]
-            if not scores.loc[scores["facility_id"] == TARGET_FACILITY_ID, "name"].empty
-            else TARGET_FACILITY_ID
-        )
-        target_before_after = {
-            "facility_id": TARGET_FACILITY_ID,
-            "name": facility_name,
-            "I_peak_before": float(target_initial_i_peak or 0.0),
-            "I_peak_after": float(target_after_i_peak or 0.0),
+        per_target_rows = []
+        for target_id in TARGET_FACILITY_IDS:
+            name_rows = scores.loc[scores["facility_id"] == target_id, "name"]
+            facility_name = str(name_rows.iloc[0]) if not name_rows.empty else target_id
+            before_val = float(target_initial_by_facility.get(target_id, 0.0))
+            after_val = float(best_target_i_by_facility.get(target_id, 0.0))
+            per_target_rows.append(
+                {
+                    "facility_id": target_id,
+                    "name": facility_name,
+                    "I_peak_before": before_val,
+                    "I_peak_after": after_val,
+                    "delta": after_val - before_val,
+                    "delta_pct": (((after_val - before_val) / before_val) * 100.0) if before_val != 0.0 else None,
+                }
+            )
+
+        targets_before_after = {
+            "target_facility_ids": TARGET_FACILITY_IDS,
+            "I_peak_before_mean": float(target_initial_i_peak or 0.0),
+            "I_peak_after_mean": float(target_after_i_peak or 0.0),
             "delta": float((target_after_i_peak or 0.0) - (target_initial_i_peak or 0.0)),
-            "delta_pct": float(
-                (((target_after_i_peak or 0.0) - (target_initial_i_peak or 0.0)) / (target_initial_i_peak or 1.0)) * 100.0
-            ) if float(target_initial_i_peak or 0.0) != 0.0 else None,
+            "delta_pct": (
+                float((((target_after_i_peak or 0.0) - (target_initial_i_peak or 0.0)) / target_initial_i_peak) * 100.0)
+                if float(target_initial_i_peak or 0.0) != 0.0
+                else None
+            ),
+            "facilities": per_target_rows,
             "routes_considered": route_ids,
             "routes_changed": {
                 str(row.route_id): int(row.delta)
                 for row in target_changed_routes.itertuples(index=False)
             },
         }
-        TARGET_BEFORE_AFTER_JSON.write_text(
-            json.dumps(target_before_after, ensure_ascii=False, indent=2),
+        TARGETS_BEFORE_AFTER_JSON.write_text(
+            json.dumps(targets_before_after, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        if len(TARGET_FACILITY_IDS) == 1:
+            single_row = per_target_rows[0]
+            target_before_after = {
+                **single_row,
+                "routes_considered": route_ids,
+                "routes_changed": {
+                    str(row.route_id): int(row.delta)
+                    for row in target_changed_routes.itertuples(index=False)
+                },
+            }
+            TARGET_BEFORE_AFTER_JSON.write_text(
+                json.dumps(target_before_after, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
 
     # ── графік 1: крива навчання (reward) ────────────────────────────────────
     history = callback.history if (callback is not None and callback.history) else [0.0]
@@ -777,8 +912,8 @@ def run() -> None:
     fig.savefig(LEARNING_CURVE_PNG, dpi=150)
     plt.close(fig)
 
-    # ── графік 2: крива I*_peak(H327) під час навчання ───────────────────────
-    if TARGET_FACILITY_ID:
+    # ── графік 2: крива I*_peak target-group під час навчання ────────────────
+    if TARGET_MODE:
         target_i_history = (
             callback.target_i_history
             if (callback is not None and callback.target_i_history)
@@ -786,7 +921,7 @@ def run() -> None:
         )
         baseline_val = float(target_initial_i_peak or 0.0)
         fig, ax = plt.subplots(figsize=(12, 5))
-        ax.plot(target_i_history, color="#A5D6A7", alpha=0.45, linewidth=1, label=f"I*_peak({TARGET_FACILITY_ID})")
+        ax.plot(target_i_history, color="#A5D6A7", alpha=0.45, linewidth=1, label=f"I*_peak({TARGET_LABEL})")
         smooth_w2 = max(1, len(target_i_history) // 50)
         smoothed2 = pd.Series(target_i_history).rolling(smooth_w2, min_periods=1).mean()
         ax.plot(smoothed2, color="#2E7D32", linewidth=2.2, label="Ковзне середнє")
@@ -797,17 +932,24 @@ def run() -> None:
         )
         final_val = float(target_i_history[-1])
         delta_pct = ((final_val - baseline_val) / baseline_val * 100.0) if baseline_val != 0 else 0.0
+        ylabel = (
+            f"I*_peak({PRIMARY_TARGET_ID})"
+            if len(TARGET_FACILITY_IDS) == 1 and PRIMARY_TARGET_ID
+            else "Середній I*_peak(target-group)"
+        )
         ax.set_title(
-            f"Навчання PPO: I*_peak({TARGET_FACILITY_ID}) по кроках  "
+            f"Навчання PPO: {ylabel} по кроках  "
             f"(Δ = {delta_pct:+.2f}%)",
             fontsize=14, fontweight="bold",
         )
         ax.set_xlabel("Крок callback", fontsize=12)
-        ax.set_ylabel(f"I*_peak({TARGET_FACILITY_ID})", fontsize=12)
+        ax.set_ylabel(ylabel, fontsize=12)
         ax.legend(fontsize=11)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
-        fig.savefig(TARGET_LEARNING_CURVE_PNG, dpi=150)
+        fig.savefig(TARGETS_LEARNING_CURVE_PNG, dpi=150)
+        if len(TARGET_FACILITY_IDS) == 1:
+            fig.savefig(TARGET_LEARNING_CURVE_PNG, dpi=150)
         plt.close(fig)
 
     # ── графік 3: топ-10 маршрутів за зміною частоти ─────────────────────────
@@ -843,7 +985,7 @@ def run() -> None:
     fig.savefig(TOP_CHANGES_PNG, dpi=150)
     plt.close(fig)
 
-    if TARGET_FACILITY_ID:
+    if TARGET_MODE:
         bar_colors_local = ["#2E7D32" if d > 0 else "#C62828" for d in top_changes["delta"]]
         fig, ax = plt.subplots(figsize=(12, 6))
         bars = ax.bar(range(len(top_changes)), top_changes["delta"], color=bar_colors_local)
@@ -859,14 +1001,16 @@ def run() -> None:
                 ha="center", va="bottom", fontsize=10, fontweight="bold",
             )
         ax.set_title(
-            f"Зміни частот маршрутів локальної підмережі {TARGET_FACILITY_ID}",
+            f"Зміни частот маршрутів локальної підмережі {TARGET_LABEL}",
             fontsize=14, fontweight="bold",
         )
         ax.set_xlabel("Маршрут (вид транспорту + номер)", fontsize=12)
         ax.set_ylabel("Δ частоти (рейс/год)", fontsize=12)
         ax.grid(True, axis="y", alpha=0.3)
         fig.tight_layout()
-        fig.savefig(TARGET_ROUTE_CHANGES_PNG, dpi=150)
+        fig.savefig(TARGETS_ROUTE_CHANGES_PNG, dpi=150)
+        if len(TARGET_FACILITY_IDS) == 1:
+            fig.savefig(TARGET_ROUTE_CHANGES_PNG, dpi=150)
         plt.close(fig)
 
     # ── графік 4: scatter до/після по всіх закладах ───────────────────────────
@@ -877,17 +1021,20 @@ def run() -> None:
         s=18, alpha=0.5, color="#1565C0", edgecolors="none", label="Заклади",
     )
     ax.plot([0, max_val], [0, max_val], linestyle="--", color="#555", linewidth=1.2, label="Без змін")
-    if TARGET_FACILITY_ID:
-        h327_row = compare_df[compare_df["facility_id"] == TARGET_FACILITY_ID]
-        if not h327_row.empty:
-            hx = float(h327_row["I_peak_before"].iloc[0])
-            hy = float(h327_row["I_peak_after"].iloc[0])
-            ax.scatter(hx, hy, s=90, color="#E65100", zorder=5, label=TARGET_FACILITY_ID)
-            ax.annotate(
-                TARGET_FACILITY_ID,
-                xy=(hx, hy), xytext=(8, 4), textcoords="offset points",
-                fontsize=10, color="#E65100", fontweight="bold",
+    if TARGET_MODE:
+        target_rows = compare_df[compare_df["facility_id"].isin(TARGET_FACILITY_IDS)]
+        if not target_rows.empty:
+            ax.scatter(
+                target_rows["I_peak_before"], target_rows["I_peak_after"],
+                s=90, color="#E65100", zorder=5, label="Target-group"
             )
+            for row in target_rows.itertuples(index=False):
+                ax.annotate(
+                    str(row.facility_id),
+                    xy=(float(row.I_peak_before), float(row.I_peak_after)),
+                    xytext=(8, 4), textcoords="offset points",
+                    fontsize=10, color="#E65100", fontweight="bold",
+                )
     ax.set_xlabel("I*_peak до оптимізації", fontsize=12)
     ax.set_ylabel("I*_peak після оптимізації", fontsize=12)
     ax.set_title("Зміна доступності закладів: до vs після", fontsize=14, fontweight="bold")
@@ -919,8 +1066,8 @@ def run() -> None:
     fig.savefig(HIST_PNG, dpi=150)
     plt.close(fig)
 
-    # ── графік 6: scatter очікування до/після для змінених маршрутів H327 ────
-    if TARGET_FACILITY_ID:
+    # ── графік 6: scatter очікування до/після для змінених маршрутів target-group ──
+    if TARGET_MODE:
         wait_plot_rows = []
         changed_route_set = set(target_changed_routes["route_id"].astype(str))
         for row in catchment.itertuples(index=False):
@@ -934,7 +1081,7 @@ def run() -> None:
             if route_idx is None:
                 continue
             base_freq = max(float(base_freq_by_route.get(route_id, 1.0)), 1.0)
-            curr_freq = max(float(eval_env.current_freq[route_idx]), 1.0)
+            curr_freq = max(float(optimal_freq[route_idx]), 1.0)
             new_wait = float(old_wait) * (base_freq / curr_freq)
             route_label = f"{route_stats[route_stats['route_id'] == route_id]['transport'].values[0]} " \
                           f"{route_stats[route_stats['route_id'] == route_id]['route'].values[0]}" \
@@ -965,13 +1112,15 @@ def run() -> None:
             ax.set_xlabel("Час очікування до (хв)", fontsize=12)
             ax.set_ylabel("Час очікування після (хв)", fontsize=12)
             ax.set_title(
-                f"Час очікування до/після зміни частот\n(маршрути локальної підмережі {TARGET_FACILITY_ID})",
+                f"Час очікування до/після зміни частот\n(маршрути локальної підмережі {TARGET_LABEL})",
                 fontsize=13, fontweight="bold",
             )
             ax.legend(fontsize=11)
             ax.grid(True, alpha=0.3)
             fig.tight_layout()
-            fig.savefig(TARGET_WAIT_SCATTER_PNG, dpi=150)
+            fig.savefig(TARGETS_WAIT_SCATTER_PNG, dpi=150)
+            if len(TARGET_FACILITY_IDS) == 1:
+                fig.savefig(TARGET_WAIT_SCATTER_PNG, dpi=150)
             plt.close(fig)
 
     gat_model = TransitGAT()

@@ -71,9 +71,13 @@ n_estimators = 200        # GradientBoostingRegressor
 
 [rl]
 # Безпечний дебаг-режим за замовчуванням: без subprocess і з 1 env.
-target_facility_id = "H327"
-use_subproc = false
-n_envs = 1
+# target_facility_id = "H327"
+# Якщо потрібно тестувати групу закладів, список нижче має пріоритет
+# над одиночним target_facility_id.
+target_facility_ids = ["H150", "S455", "H472", "H340", "S0"]
+target_facility_id = "H274"
+use_subproc = true
+n_envs = 2
 max_steps = 50
 total_timesteps = 50000
 learning_rate = 0.0003
