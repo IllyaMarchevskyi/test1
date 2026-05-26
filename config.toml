@@ -85,3 +85,7 @@ n_steps = 50
 log_every = 100
 checkpoint_every = 500
 max_route_delta = 3
+non_target_harm_weight = 1.0
+# Ігноруємо мікроскопічний числовий шум при штрафі за шкоду нецільовим закладам.
+non_target_harm_tolerance = 0.000000001
+metric_epsilon = 0.000000001

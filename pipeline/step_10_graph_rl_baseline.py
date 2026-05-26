@@ -68,6 +68,7 @@ def run() -> None:
     OPT_FREQ_CSV = PROCESSED_DIR / "optimal_frequencies.csv"
     TARGET_BEFORE_AFTER_JSON = PROCESSED_DIR / "target_facility_before_after.json"
     TARGETS_BEFORE_AFTER_JSON = PROCESSED_DIR / "target_facilities_before_after.json"
+    AFFECTED_BEFORE_AFTER_CSV = PROCESSED_DIR / "rl_affected_facilities_before_after.csv"
     OPT_FREQ_TARGET_CSV = PROCESSED_DIR / "optimal_frequencies_H327.csv"
     OPT_FREQ_TARGETS_CSV = PROCESSED_DIR / "optimal_frequencies_targets.csv"
     MODEL_PATH = PROCESSED_DIR / "rl_model"
@@ -93,6 +94,8 @@ def run() -> None:
     CHECKPOINT_EVERY = max(1, int(RL_CFG.get("checkpoint_every", 500)))
     MAX_ROUTE_DELTA = max(1, int(RL_CFG.get("max_route_delta", 3)))
     NON_TARGET_HARM_WEIGHT = float(RL_CFG.get("non_target_harm_weight", 1.0))
+    NON_TARGET_HARM_TOLERANCE = max(0.0, float(RL_CFG.get("non_target_harm_tolerance", 0.0)))
+    METRIC_EPS = max(0.0, float(RL_CFG.get("metric_epsilon", 1e-9)))
     TARGET_FACILITY_ID_RAW = RL_CFG.get("target_facility_id", "")
     TARGET_FACILITY_ID = str(TARGET_FACILITY_ID_RAW).strip() or None
     TARGET_FACILITY_IDS_RAW = RL_CFG.get("target_facility_ids", [])
@@ -148,6 +151,7 @@ def run() -> None:
             [
                 OPT_FREQ_TARGETS_CSV,
                 TARGETS_BEFORE_AFTER_JSON,
+                AFFECTED_BEFORE_AFTER_CSV,
                 TARGETS_LEARNING_CURVE_PNG,
                 TARGETS_ROUTE_CHANGES_PNG,
                 TARGETS_WAIT_SCATTER_PNG,
@@ -196,7 +200,8 @@ def run() -> None:
         "10_rl: конфіг "
         f"use_subproc={USE_SUBPROC} n_envs={N_ENVS} max_steps={MAX_STEPS} "
         f"total_timesteps={TOTAL_TIMESTEPS} max_route_delta={MAX_ROUTE_DELTA} "
-        f"non_target_harm_weight={NON_TARGET_HARM_WEIGHT}"
+        f"non_target_harm_weight={NON_TARGET_HARM_WEIGHT} "
+        f"non_target_harm_tolerance={NON_TARGET_HARM_TOLERANCE}"
     )
     index_df = pd.read_csv(ACCESSIBILITY_INDEX)
     global_index_df = index_df.copy()
@@ -663,7 +668,9 @@ def run() -> None:
                 return 0.0
             before = float(np.mean([initial_i_peak.get(fid, 0.0) for fid in non_target_ids]))
             after = self._mean_i_peak(non_target_ids)
-            return max(0.0, before - after)
+            # Толеранс відсікає числовий шум: штрафуємо тільки реальне
+            # погіршення нецільових закладів, а не похибку float.
+            return max(0.0, before - after - NON_TARGET_HARM_TOLERANCE)
 
         def _objective_value(self) -> float:
             if TARGET_MODE:
@@ -929,13 +936,13 @@ def run() -> None:
                     nearest_target_id, nearest_name, min_dist_m = min(distances, key=lambda item: item[2])
                     print(
                         f"  {row.route_id} ({row.transport} {row.route}): "
-                        f"delta={int(row.delta):+d}, найближча зупинка до {nearest_target_id} "
+                        f"delta={float(row.delta):+.2f}, найближча зупинка до {nearest_target_id} "
                         f"({nearest_name}): {min_dist_m:.0f}м"
                     )
                 else:
                     print(
                         f"  {row.route_id} ({row.transport} {row.route}): "
-                        f"delta={int(row.delta):+d}, найближча зупинка до target-group: н/д"
+                        f"delta={float(row.delta):+.2f}, найближча зупинка до target-group: н/д"
                     )
 
     before_df = index_df[["facility_id", "I_peak"]].rename(columns={"I_peak": "I_peak_before"})
@@ -980,6 +987,19 @@ def run() -> None:
     compare_df = before_df.merge(after_df, on="facility_id", how="left")
     compare_df["I_peak_after"] = pd.to_numeric(compare_df["I_peak_after"], errors="coerce").fillna(compare_df["I_peak_before"])
 
+    facility_names = {
+        str(row.facility_id): str(row.name)
+        for row in index_df[["facility_id", "name"]].dropna(subset=["name"]).itertuples(index=False)
+    } if "name" in index_df.columns else {}
+    if SCORES_PATH.exists():
+        try:
+            scores_names = pd.read_csv(SCORES_PATH, usecols=["facility_id", "name"])
+            scores_names["facility_id"] = scores_names["facility_id"].astype(str)
+            for row in scores_names.dropna(subset=["name"]).itertuples(index=False):
+                facility_names.setdefault(str(row.facility_id), str(row.name))
+        except Exception:
+            pass
+
     def gini(values):
         arr = pd.to_numeric(values, errors="coerce").dropna().to_numpy(dtype=float, copy=True)
         if len(arr) == 0 or arr.sum() <= 0:
@@ -1004,6 +1024,7 @@ def run() -> None:
         )
     global_after_mean = None
     affected_summary = None
+    affected_compare = pd.DataFrame()
     if TARGET_MODE:
         global_after_mean = after_mean
         affected_compare = compare_df[compare_df["facility_id"].isin(best_affected_facility_ids)].copy()
@@ -1012,15 +1033,41 @@ def run() -> None:
         ].copy()
         if not affected_compare.empty:
             affected_compare["delta"] = affected_compare["I_peak_after"] - affected_compare["I_peak_before"]
+            affected_compare["delta_clean"] = affected_compare["delta"].where(affected_compare["delta"].abs() > METRIC_EPS, 0.0)
+            affected_compare["delta_pct"] = np.where(
+                affected_compare["I_peak_before"].abs() > 0,
+                affected_compare["delta"] / affected_compare["I_peak_before"] * 100.0,
+                np.nan,
+            )
+            affected_compare["is_target"] = affected_compare["facility_id"].isin(TARGET_FACILITY_IDS)
+            affected_compare["name"] = affected_compare["facility_id"].map(facility_names).fillna(affected_compare["facility_id"])
+            affected_compare = affected_compare[
+                [
+                    "facility_id",
+                    "name",
+                    "is_target",
+                    "I_peak_before",
+                    "I_peak_after",
+                    "delta",
+                    "delta_clean",
+                    "delta_pct",
+                ]
+            ].sort_values(["is_target", "delta"], ascending=[False, True])
+            affected_compare.to_csv(AFFECTED_BEFORE_AFTER_CSV, index=False, encoding="utf-8")
+
             non_target_affected_compare["delta"] = (
                 non_target_affected_compare["I_peak_after"]
                 - non_target_affected_compare["I_peak_before"]
             )
+            non_target_affected_compare["delta_clean"] = non_target_affected_compare["delta"].where(
+                non_target_affected_compare["delta"].abs() > METRIC_EPS,
+                0.0,
+            )
             affected_summary = {
                 "affected_facilities_count": int(len(affected_compare)),
                 "non_target_affected_count": int(len(non_target_affected_compare)),
-                "improved_count": int((affected_compare["delta"] > 0).sum()),
-                "worsened_count": int((affected_compare["delta"] < 0).sum()),
+                "improved_count": int((affected_compare["delta_clean"] > 0).sum()),
+                "worsened_count": int((affected_compare["delta_clean"] < 0).sum()),
                 "non_target_mean_before": (
                     float(non_target_affected_compare["I_peak_before"].mean())
                     if not non_target_affected_compare.empty
@@ -1032,11 +1079,13 @@ def run() -> None:
                     else None
                 ),
                 "non_target_mean_delta": (
-                    float(non_target_affected_compare["delta"].mean())
+                    float(non_target_affected_compare["delta_clean"].mean())
                     if not non_target_affected_compare.empty
                     else None
                 ),
-                "max_drop": float(affected_compare["delta"].min()),
+                "max_drop": float(affected_compare["delta_clean"].min()),
+                "metric_epsilon": METRIC_EPS,
+                "affected_before_after_csv": str(AFFECTED_BEFORE_AFTER_CSV),
             }
 
     results = {
@@ -1071,18 +1120,17 @@ def run() -> None:
             "n_steps": PPO_N_STEPS,
             "max_route_delta": MAX_ROUTE_DELTA,
             "non_target_harm_weight": NON_TARGET_HARM_WEIGHT,
+            "non_target_harm_tolerance": NON_TARGET_HARM_TOLERANCE,
+            "metric_epsilon": METRIC_EPS,
             "action_mode": "redistribution_pair",
         },
     }
     RL_RESULTS_JSON.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    if TARGET_MODE and SCORES_PATH.exists():
-        scores = pd.read_csv(SCORES_PATH, usecols=["facility_id", "name"])
-        scores["facility_id"] = scores["facility_id"].astype(str)
+    if TARGET_MODE:
         per_target_rows = []
         for target_id in TARGET_FACILITY_IDS:
-            name_rows = scores.loc[scores["facility_id"] == target_id, "name"]
-            facility_name = str(name_rows.iloc[0]) if not name_rows.empty else target_id
+            facility_name = facility_names.get(target_id, target_id)
             before_val = float(target_initial_by_facility.get(target_id, 0.0))
             after_val = float(best_target_i_by_facility.get(target_id, 0.0))
             per_target_rows.append(
@@ -1109,7 +1157,7 @@ def run() -> None:
             "facilities": per_target_rows,
             "routes_considered": route_ids,
             "routes_changed": {
-                str(row.route_id): int(row.delta)
+                str(row.route_id): round(float(row.delta), 2)
                 for row in target_changed_routes.itertuples(index=False)
             },
         }
@@ -1123,7 +1171,7 @@ def run() -> None:
                 **single_row,
                 "routes_considered": route_ids,
                 "routes_changed": {
-                    str(row.route_id): int(row.delta)
+                    str(row.route_id): round(float(row.delta), 2)
                     for row in target_changed_routes.itertuples(index=False)
                 },
             }
@@ -1211,7 +1259,7 @@ def run() -> None:
         ax.text(
             bar.get_x() + bar.get_width() / 2,
             bar.get_height() + offset,
-            f"{int(val):+d}",
+            f"{float(val):+.2f}",
             ha="center", va="bottom", fontsize=10, fontweight="bold",
         )
     ax.set_title("Топ-10 маршрутів за зміною частоти рейсів/год", fontsize=14, fontweight="bold")
@@ -1234,7 +1282,7 @@ def run() -> None:
             ax.text(
                 bar.get_x() + bar.get_width() / 2,
                 bar.get_height() + offset,
-                f"{int(val):+d}",
+                f"{float(val):+.2f}",
                 ha="center", va="bottom", fontsize=10, fontweight="bold",
             )
         ax.set_title(

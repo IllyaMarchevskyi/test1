@@ -28,6 +28,7 @@ STEPS = [
     ("10b_debug", "pipeline.step_10b_h327_route_debug", "H327 local route schedule debug"),
     ("10c_check", "pipeline.step_10c_rl_recompute_check", "RL baseline vs recompute check"),
     ("10d_debug", "pipeline.step_10d_all_routes_freq_debug", "All routes weekdays frequency debug"),
+    ("10e_group_debug", "pipeline.step_10e_target_group_debug", "RL target group debug"),
 ]
 
 STEP_OUTPUTS = {
@@ -85,6 +86,7 @@ STEP_OUTPUTS = {
         PIPELINE_DIR / "data/processed/optimal_frequencies_targets.csv",
         PIPELINE_DIR / "data/processed/target_facility_before_after.json",
         PIPELINE_DIR / "data/processed/target_facilities_before_after.json",
+        PIPELINE_DIR / "data/processed/rl_affected_facilities_before_after.csv",
         PIPELINE_DIR / "data/processed/rl_model.zip",
         PIPELINE_DIR / "data/processed/rl_checkpoints",
         PIPELINE_DIR / "data/outputs/rl_learning_curve.png",
@@ -108,6 +110,12 @@ STEP_OUTPUTS = {
     ],
     "10d_debug": [
         PIPELINE_DIR / "data/processed/all_routes_weekdays_freq_debug.csv",
+    ],
+    "10e_group_debug": [
+        PIPELINE_DIR / "data/processed/rl_target_group_debug_summary.json",
+        PIPELINE_DIR / "data/processed/rl_target_group_routes.csv",
+        PIPELINE_DIR / "data/processed/rl_target_group_affected_facilities.csv",
+        PIPELINE_DIR / "data/processed/rl_target_group_candidates.csv",
     ],
 }
 

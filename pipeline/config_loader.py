@@ -1,6 +1,10 @@
 """Завантажує config.toml і надає зручний доступ до параметрів."""
-import tomllib
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 
 _CONFIG_PATH = Path(__file__).parent.parent / "config.toml"
 
