@@ -26,6 +26,7 @@ STEPS = [
     ("09_validate", "pipeline.step_09b_validate_index_baseline", "Baseline accessibility validation"),
     ("10_rl", "pipeline.step_10_graph_rl_baseline", "Baseline graph RL"),
     ("10b_debug", "pipeline.step_10b_h327_route_debug", "H327 local route schedule debug"),
+    ("10c_check", "pipeline.step_10c_rl_recompute_check", "RL baseline vs recompute check"),
 ]
 
 STEP_OUTPUTS = {
@@ -99,6 +100,10 @@ STEP_OUTPUTS = {
     "10b_debug": [
         PIPELINE_DIR / "data/processed/h327_route_schedule_debug.csv",
         PIPELINE_DIR / "data/processed/h327_route_schedule_stops_debug.csv",
+    ],
+    "10c_check": [
+        PIPELINE_DIR / "data/processed/rl_recompute_check_targets.csv",
+        PIPELINE_DIR / "data/processed/rl_recompute_check_summary.json",
     ],
 }
 
