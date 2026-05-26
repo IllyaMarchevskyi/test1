@@ -92,6 +92,7 @@ def run() -> None:
     LOG_EVERY = max(1, int(RL_CFG.get("log_every", 100)))
     CHECKPOINT_EVERY = max(1, int(RL_CFG.get("checkpoint_every", 500)))
     MAX_ROUTE_DELTA = max(1, int(RL_CFG.get("max_route_delta", 3)))
+    NON_TARGET_HARM_WEIGHT = float(RL_CFG.get("non_target_harm_weight", 1.0))
     TARGET_FACILITY_ID_RAW = RL_CFG.get("target_facility_id", "")
     TARGET_FACILITY_ID = str(TARGET_FACILITY_ID_RAW).strip() or None
     TARGET_FACILITY_IDS_RAW = RL_CFG.get("target_facility_ids", [])
@@ -163,6 +164,7 @@ def run() -> None:
                 ]
             )
     cached_target_ids: list[str] = []
+    cached_action_mode = ""
     if RL_RESULTS_JSON.exists():
         try:
             cached_run = json.loads(RL_RESULTS_JSON.read_text(encoding="utf-8")).get("run_config", {})
@@ -170,13 +172,19 @@ def run() -> None:
             if not cached_target_ids:
                 cached_single = str(cached_run.get("target_facility_id") or "").strip()
                 cached_target_ids = [cached_single] if cached_single else []
+            cached_action_mode = str(cached_run.get("action_mode") or "")
         except Exception:
             cached_target_ids = []
+            cached_action_mode = ""
 
     if all(path.exists() for path in final_outputs):
         outputs_mtime = min(path.stat().st_mtime for path in final_outputs)
         inputs_mtime = max(path.stat().st_mtime for path in required)
-        if outputs_mtime >= inputs_mtime and cached_target_ids == TARGET_FACILITY_IDS:
+        if (
+            outputs_mtime >= inputs_mtime
+            and cached_target_ids == TARGET_FACILITY_IDS
+            and cached_action_mode == "redistribution_pair"
+        ):
             print("10_rl: кеш RL-результатів уже актуальний, пропускаємо повторне навчання.")
             print(f"  model:   {model_zip_path}")
             print(f"  results: {RL_RESULTS_JSON}")
@@ -187,7 +195,8 @@ def run() -> None:
     print(
         "10_rl: конфіг "
         f"use_subproc={USE_SUBPROC} n_envs={N_ENVS} max_steps={MAX_STEPS} "
-        f"total_timesteps={TOTAL_TIMESTEPS} max_route_delta={MAX_ROUTE_DELTA}"
+        f"total_timesteps={TOTAL_TIMESTEPS} max_route_delta={MAX_ROUTE_DELTA} "
+        f"non_target_harm_weight={NON_TARGET_HARM_WEIGHT}"
     )
     index_df = pd.read_csv(ACCESSIBILITY_INDEX)
     global_index_df = index_df.copy()
@@ -320,14 +329,11 @@ def run() -> None:
                 "10_rl: для target_facility_ids="
                 f"{TARGET_FACILITY_IDS} не знайдено transit-маршрутів у catchment_buildings."
             )
-        catchment = target_rows
-        index_df = index_df[index_df["facility_id"].isin(TARGET_FACILITY_IDS)].copy()
-        entropy = entropy[entropy["facility_id"].astype(str).isin(TARGET_FACILITY_IDS)].copy()
         easyway = easyway[easyway["route_id"].astype(str).isin(local_route_ids)].copy()
         print(
             f"10_rl: локальна підмережа = {len(local_route_ids)} маршрут(ів), "
             f"цільових закладів={len(TARGET_FACILITY_IDS)}, "
-            f"рядків catchment={len(catchment):,}."
+            f"рядків target-catchment={len(target_rows):,}."
         )
     else:
         catchment = catchment.copy()
@@ -417,6 +423,22 @@ def run() -> None:
     route_stops = easyway.groupby("route_id")["stop_id"].apply(set).to_dict()
     route_ids = route_stats["route_id"].tolist()
     route_index = {route_id: idx for idx, route_id in enumerate(route_ids)}
+    route_type_to_indices: dict[int, list[int]] = {}
+    for idx, transport_type in enumerate(route_stats["transport_type"].to_numpy(dtype=int)):
+        route_type_to_indices.setdefault(int(transport_type), []).append(idx)
+    transfer_actions = [
+        (donor_idx, receiver_idx)
+        for same_type_indices in route_type_to_indices.values()
+        for donor_idx in same_type_indices
+        for receiver_idx in same_type_indices
+        if donor_idx != receiver_idx
+    ]
+    if not transfer_actions:
+        raise ValueError(
+            "10_rl: не вдалося побудувати action space перерозподілу. "
+            "Потрібно щонайменше два маршрути одного типу транспорту."
+        )
+    print(f"10_rl: action space перерозподілу = {len(transfer_actions):,} пар donor→receiver.")
 
     graph = nx.Graph()
     for route_id in route_ids:
@@ -456,6 +478,8 @@ def run() -> None:
         rid = str(row.peak_route_id)
         if rid and rid != "nan" and rid in route_index:
             facilities_by_route.setdefault(route_index[rid], set()).add(fid)
+
+    target_facility_set = set(TARGET_FACILITY_IDS)
 
     initial_i_peak = dict(zip(index_df["facility_id"], pd.to_numeric(index_df["I_peak"], errors="coerce").fillna(0.0)))
     hnorm_by_facility = dict(zip(entropy["facility_id"].astype(str), pd.to_numeric(entropy["Hnorm_peak"], errors="coerce").fillna(0.0)))
@@ -502,7 +526,7 @@ def run() -> None:
                 int(tt): float(self.initial_freq[self.route_types == tt].sum())
                 for tt in np.unique(self.route_types)
             }
-            self.action_space = gym.spaces.Discrete(len(self.route_ids) * 2)
+            self.action_space = gym.spaces.Discrete(len(transfer_actions))
             self.observation_space = gym.spaces.Box(
                 low=0.0,
                 high=1.0,
@@ -570,53 +594,71 @@ def run() -> None:
 
             return (weighted_sum / total_city_weight) * float(hnorm_by_facility.get(facility_id, 0.0))
 
+        def _mean_i_peak(self, facility_ids: set[str] | list[str]) -> float:
+            if not facility_ids:
+                return 0.0
+            return float(np.mean([self.I_peak.get(str(fid), 0.0) for fid in facility_ids]))
+
+        def _target_mean(self) -> float:
+            return self._mean_i_peak(TARGET_FACILITY_IDS) if TARGET_MODE else self.prev_mean
+
+        def _non_target_harm(self) -> float:
+            non_target_ids = self.affected_facility_ids - target_facility_set
+            if not non_target_ids:
+                return 0.0
+            before = float(np.mean([initial_i_peak.get(fid, 0.0) for fid in non_target_ids]))
+            after = self._mean_i_peak(non_target_ids)
+            return max(0.0, before - after)
+
+        def _objective_value(self) -> float:
+            if TARGET_MODE:
+                return self._target_mean() - (NON_TARGET_HARM_WEIGHT * self._non_target_harm())
+            return self.prev_mean
+
         def step(self, action):
-            route_idx = int(action // 2)
-            action_type = int(action % 2)
-            transport_type = int(self.route_types[route_idx])
+            donor_idx, receiver_idx = transfer_actions[int(action)]
+            transport_type = int(self.route_types[donor_idx])
 
             invalid_action = False
 
-            if action_type == 0:
-                if self.budget.get(transport_type, 0.0) < 1.0:
-                    invalid_action = True
-                elif self.current_freq[route_idx] + 1.0 > 12.0:
-                    invalid_action = True
-                elif self.current_freq[route_idx] + 1.0 > min(12.0, self.initial_freq[route_idx] + float(MAX_ROUTE_DELTA)):
-                    invalid_action = True
-                else:
-                    self.current_freq[route_idx] += 1.0
-                    self.budget[transport_type] -= 1.0
+            if int(self.route_types[receiver_idx]) != transport_type:
+                invalid_action = True
+            elif self.current_freq[donor_idx] - 1.0 < 1.0:
+                invalid_action = True
+            elif self.current_freq[donor_idx] - 1.0 < max(1.0, self.initial_freq[donor_idx] - float(MAX_ROUTE_DELTA)):
+                invalid_action = True
+            elif self.current_freq[receiver_idx] + 1.0 > 12.0:
+                invalid_action = True
+            elif self.current_freq[receiver_idx] + 1.0 > min(12.0, self.initial_freq[receiver_idx] + float(MAX_ROUTE_DELTA)):
+                invalid_action = True
             else:
-                if self.current_freq[route_idx] - 1.0 < 1.0:
-                    invalid_action = True
-                elif self.current_freq[route_idx] - 1.0 < max(1.0, self.initial_freq[route_idx] - float(MAX_ROUTE_DELTA)):
-                    invalid_action = True
-                else:
-                    self.current_freq[route_idx] -= 1.0
-                    self.budget[transport_type] += 1.0
+                self.current_freq[donor_idx] -= 1.0
+                self.current_freq[receiver_idx] += 1.0
 
             if not invalid_action:
-                if TARGET_MODE:
-                    # У локальному режимі перераховуємо лише цільову групу закладів.
-                    for target_fid in TARGET_FACILITY_IDS:
-                        self.I_peak[target_fid] = self._recalc_I(target_fid)
-                else:
-                    affected = facilities_by_route.get(route_idx, set())
-                    for fid in affected:
-                        self.I_peak[fid] = self._recalc_I(fid)
+                affected = (
+                    facilities_by_route.get(donor_idx, set())
+                    | facilities_by_route.get(receiver_idx, set())
+                )
+                self.affected_facility_ids.update(affected)
+                for fid in affected:
+                    self.I_peak[fid] = self._recalc_I(fid)
 
             if TARGET_MODE:
-                new_value = float(
-                    np.mean([self.I_peak.get(fid, 0.0) for fid in TARGET_FACILITY_IDS])
+                new_value = self._target_mean()
+                non_target_harm = self._non_target_harm()
+                reward = -1.0 if invalid_action else (
+                    (new_value - self.prev_value) - (NON_TARGET_HARM_WEIGHT * non_target_harm)
                 )
-                reward = -1.0 if invalid_action else (new_value - self.prev_value)
                 self.prev_value = new_value
                 self.current_target_i_peak = new_value
+                self.current_objective_value = self._objective_value()
+                self.current_non_target_harm = non_target_harm
             else:
                 new_mean = float(np.mean(list(self.I_peak.values()))) if self.I_peak else 0.0
                 reward = -1.0 if invalid_action else (new_mean - self.prev_mean)
                 self.prev_mean = new_mean
+                self.current_objective_value = new_mean
 
             self.step_count += 1
             terminated = self.step_count >= self.max_steps
@@ -633,6 +675,9 @@ def run() -> None:
             self.prev_mean = float(np.mean(list(self.I_peak.values()))) if self.I_peak else 0.0
             self.prev_value = float(target_initial_i_peak or 0.0)
             self.current_target_i_peak = float(target_initial_i_peak or 0.0)
+            self.affected_facility_ids: set[str] = set()
+            self.current_non_target_harm = 0.0
+            self.current_objective_value = self._objective_value()
             return self._get_obs(), {}
 
     class ProgressCallback(BaseCallback):
@@ -696,6 +741,7 @@ def run() -> None:
         model_zip_path.exists()
         and model_zip_path.stat().st_mtime >= max(path.stat().st_mtime for path in required)
         and cached_target_ids == TARGET_FACILITY_IDS
+        and cached_action_mode == "redistribution_pair"
     )
 
     if model_fresh:
@@ -724,16 +770,26 @@ def run() -> None:
     done = False
     route_deltas = []
     best_eval_step = 0
-    best_eval_value = float(eval_env.current_target_i_peak) if TARGET_MODE else float(eval_env.prev_mean)
+    best_eval_value = (
+        float(eval_env.current_objective_value)
+        if TARGET_MODE
+        else float(eval_env.prev_mean)
+    )
+    best_eval_target_value = float(eval_env.current_target_i_peak) if TARGET_MODE else float(eval_env.prev_mean)
     best_freq_snapshot = eval_env.current_freq.copy()
     eval_progress = tqdm(total=eval_env.max_steps, desc="10_rl eval", leave=True)
     while not done:
         action, _ = model.predict(obs, deterministic=True)
         obs, reward, terminated, truncated, _ = eval_env.step(action)
         done = terminated or truncated
-        current_eval_value = float(eval_env.current_target_i_peak) if TARGET_MODE else float(eval_env.prev_mean)
+        current_eval_value = (
+            float(eval_env.current_objective_value)
+            if TARGET_MODE
+            else float(eval_env.prev_mean)
+        )
         if current_eval_value > best_eval_value:
             best_eval_value = current_eval_value
+            best_eval_target_value = float(eval_env.current_target_i_peak) if TARGET_MODE else current_eval_value
             best_eval_step = int(eval_env.step_count)
             best_freq_snapshot = eval_env.current_freq.copy()
         eval_progress.update(1)
@@ -745,7 +801,7 @@ def run() -> None:
     if TARGET_MODE:
         print(
             f"10_rl: найкращий стан для {TARGET_LABEL} знайдено на кроці {best_eval_step} "
-            f"з I_peak={best_eval_value:.6f}"
+            f"з objective={best_eval_value:.6f}, I_peak={best_eval_target_value:.6f}"
         )
 
     optimal_freq = best_freq_snapshot if TARGET_MODE else eval_env.current_freq
@@ -754,7 +810,7 @@ def run() -> None:
         print(
             "10_rl debug: best-state summary | "
             f"step={best_eval_step} "
-            f"best_eval_value={best_eval_value:.6f} "
+            f"best_objective={best_eval_value:.6f} "
             f"same_as_initial={initial_freq_equal}"
         )
         changed_count = int(np.sum(~np.isclose(best_freq_snapshot, eval_env.initial_freq)))
@@ -834,9 +890,22 @@ def run() -> None:
         best_eval_env = KyivTransitEnv()
         best_eval_env.reset()
         best_eval_env.current_freq = best_freq_snapshot.copy()
+        changed_route_indices = [
+            route_index[str(row.route_id)]
+            for row in target_changed_routes.itertuples(index=False)
+            if str(row.route_id) in route_index
+        ]
+        best_affected_facility_ids = set()
+        for route_idx in changed_route_indices:
+            best_affected_facility_ids.update(facilities_by_route.get(route_idx, set()))
+        best_affected_facility_ids.update(TARGET_FACILITY_IDS)
         best_target_i_by_facility = {
             fid: float(best_eval_env._recalc_I(fid))
             for fid in TARGET_FACILITY_IDS
+        }
+        best_affected_i_by_facility = {
+            fid: float(best_eval_env._recalc_I(fid))
+            for fid in sorted(best_affected_facility_ids)
         }
         print("10_rl debug: recomputed target values at best snapshot:")
         for target_id in TARGET_FACILITY_IDS:
@@ -848,7 +917,7 @@ def run() -> None:
         after_df = pd.DataFrame(
             [
                 {"facility_id": fid, "I_peak_after": val}
-                for fid, val in best_target_i_by_facility.items()
+                for fid, val in best_affected_i_by_facility.items()
             ]
         )
     else:
@@ -881,9 +950,41 @@ def run() -> None:
             f"after={float(target_after_i_peak or 0.0):.6f}"
         )
     global_after_mean = None
+    affected_summary = None
     if TARGET_MODE:
-        before_target_mean = float(np.mean([global_initial_i_peak.get(fid, 0.0) for fid in TARGET_FACILITY_IDS]))
-        global_after_mean = global_initial_mean + ((target_after_i_peak - before_target_mean) / global_n_facilities)
+        global_after_mean = after_mean
+        affected_compare = compare_df[compare_df["facility_id"].isin(best_affected_facility_ids)].copy()
+        non_target_affected_compare = affected_compare[
+            ~affected_compare["facility_id"].isin(TARGET_FACILITY_IDS)
+        ].copy()
+        if not affected_compare.empty:
+            affected_compare["delta"] = affected_compare["I_peak_after"] - affected_compare["I_peak_before"]
+            non_target_affected_compare["delta"] = (
+                non_target_affected_compare["I_peak_after"]
+                - non_target_affected_compare["I_peak_before"]
+            )
+            affected_summary = {
+                "affected_facilities_count": int(len(affected_compare)),
+                "non_target_affected_count": int(len(non_target_affected_compare)),
+                "improved_count": int((affected_compare["delta"] > 0).sum()),
+                "worsened_count": int((affected_compare["delta"] < 0).sum()),
+                "non_target_mean_before": (
+                    float(non_target_affected_compare["I_peak_before"].mean())
+                    if not non_target_affected_compare.empty
+                    else None
+                ),
+                "non_target_mean_after": (
+                    float(non_target_affected_compare["I_peak_after"].mean())
+                    if not non_target_affected_compare.empty
+                    else None
+                ),
+                "non_target_mean_delta": (
+                    float(non_target_affected_compare["delta"].mean())
+                    if not non_target_affected_compare.empty
+                    else None
+                ),
+                "max_drop": float(affected_compare["delta"].min()),
+            }
 
     results = {
         "target_facility_id": PRIMARY_TARGET_ID,
@@ -905,6 +1006,7 @@ def run() -> None:
             "decreased": optimal_freq_df[optimal_freq_df["delta"] < 0][["route_id", "delta"]].to_dict("records"),
             "disabled": optimal_freq_df[optimal_freq_df["optimal_freq"] == 0][["route_id", "delta"]].to_dict("records"),
         },
+        "affected_facilities": affected_summary,
         "run_config": {
             "target_facility_id": PRIMARY_TARGET_ID,
             "target_facility_ids": TARGET_FACILITY_IDS,
@@ -915,6 +1017,8 @@ def run() -> None:
             "learning_rate": LEARNING_RATE,
             "n_steps": PPO_N_STEPS,
             "max_route_delta": MAX_ROUTE_DELTA,
+            "non_target_harm_weight": NON_TARGET_HARM_WEIGHT,
+            "action_mode": "redistribution_pair",
         },
     }
     RL_RESULTS_JSON.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
