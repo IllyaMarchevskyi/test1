@@ -344,6 +344,7 @@ def run() -> None:
     route_stats["current_freq"] = (route_stats["total_departures"] / 11.0).clip(lower=0.0)
     route_stats["transport_type"] = route_stats["transport"].map(route_to_int).fillna(0).astype(int)
     route_stats["active"] = 1
+    route_stats["rl_initial_freq"] = route_stats["current_freq"].round().clip(lower=1, upper=12).astype(int)
 
     route_peak_mean = (
         catchment[catchment["peak_route_id"].notna()]
@@ -403,7 +404,7 @@ def run() -> None:
 
     initial_i_peak = dict(zip(index_df["facility_id"], pd.to_numeric(index_df["I_peak"], errors="coerce").fillna(0.0)))
     hnorm_by_facility = dict(zip(entropy["facility_id"].astype(str), pd.to_numeric(entropy["Hnorm_peak"], errors="coerce").fillna(0.0)))
-    base_freq_by_route = dict(zip(route_stats["route_id"], route_stats["current_freq"]))
+    base_freq_by_route = dict(zip(route_stats["route_id"], route_stats["rl_initial_freq"]))
     target_initial_by_facility = {
         fid: float(initial_i_peak.get(fid, 0.0))
         for fid in TARGET_FACILITY_IDS
@@ -439,7 +440,7 @@ def run() -> None:
             super().__init__()
             self.route_ids = route_ids
             self.route_types = route_stats["transport_type"].to_numpy(dtype=int)
-            self.initial_freq = route_stats["current_freq"].round().clip(lower=1, upper=12).to_numpy(dtype=int)
+            self.initial_freq = route_stats["rl_initial_freq"].to_numpy(dtype=int)
             self.max_steps = MAX_STEPS
 
             self.initial_budget = {
