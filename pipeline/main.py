@@ -27,6 +27,7 @@ STEPS = [
     ("10_rl", "pipeline.step_10_graph_rl_baseline", "Baseline graph RL"),
     ("10b_debug", "pipeline.step_10b_h327_route_debug", "H327 local route schedule debug"),
     ("10c_check", "pipeline.step_10c_rl_recompute_check", "RL baseline vs recompute check"),
+    ("10d_debug", "pipeline.step_10d_all_routes_freq_debug", "All routes weekdays frequency debug"),
 ]
 
 STEP_OUTPUTS = {
@@ -104,6 +105,9 @@ STEP_OUTPUTS = {
     "10c_check": [
         PIPELINE_DIR / "data/processed/rl_recompute_check_targets.csv",
         PIPELINE_DIR / "data/processed/rl_recompute_check_summary.json",
+    ],
+    "10d_debug": [
+        PIPELINE_DIR / "data/processed/all_routes_weekdays_freq_debug.csv",
     ],
 }
 
