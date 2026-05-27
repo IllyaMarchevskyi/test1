@@ -88,6 +88,7 @@ STEP_OUTPUTS = {
         PIPELINE_DIR / "data/processed/target_facility_before_after.json",
         PIPELINE_DIR / "data/processed/target_facilities_before_after.json",
         PIPELINE_DIR / "data/processed/rl_affected_facilities_before_after.csv",
+        PIPELINE_DIR / "data/processed/rl_global_facilities_before_after.csv",
         PIPELINE_DIR / "data/processed/rl_model.zip",
         PIPELINE_DIR / "data/processed/rl_checkpoints",
         PIPELINE_DIR / "data/outputs/rl_learning_curve.png",

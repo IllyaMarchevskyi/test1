@@ -69,6 +69,7 @@ def run() -> None:
     TARGET_BEFORE_AFTER_JSON = PROCESSED_DIR / "target_facility_before_after.json"
     TARGETS_BEFORE_AFTER_JSON = PROCESSED_DIR / "target_facilities_before_after.json"
     AFFECTED_BEFORE_AFTER_CSV = PROCESSED_DIR / "rl_affected_facilities_before_after.csv"
+    GLOBAL_BEFORE_AFTER_CSV = PROCESSED_DIR / "rl_global_facilities_before_after.csv"
     OPT_FREQ_TARGET_CSV = PROCESSED_DIR / "optimal_frequencies_H327.csv"
     OPT_FREQ_TARGETS_CSV = PROCESSED_DIR / "optimal_frequencies_targets.csv"
     MODEL_PATH = PROCESSED_DIR / "rl_model"
@@ -164,6 +165,8 @@ def run() -> None:
                     TARGET_WAIT_SCATTER_PNG,
                 ]
             )
+    else:
+        final_outputs.append(GLOBAL_BEFORE_AFTER_CSV)
     cached_target_ids: list[str] = []
     cached_action_mode = ""
     cached_run = {}
@@ -1106,6 +1109,7 @@ def run() -> None:
         )
     global_after_mean = None
     affected_summary = None
+    global_facilities_summary = None
     affected_compare = pd.DataFrame()
     if TARGET_MODE:
         global_after_mean = after_mean
@@ -1169,6 +1173,44 @@ def run() -> None:
                 "metric_epsilon": METRIC_EPS,
                 "affected_before_after_csv": str(AFFECTED_BEFORE_AFTER_CSV),
             }
+    else:
+        global_compare = compare_df.copy()
+        global_compare["delta"] = global_compare["I_peak_after"] - global_compare["I_peak_before"]
+        global_compare["delta_clean"] = global_compare["delta"].where(global_compare["delta"].abs() > METRIC_EPS, 0.0)
+        global_compare["delta_pct"] = np.where(
+            global_compare["I_peak_before"].abs() > 0,
+            global_compare["delta"] / global_compare["I_peak_before"] * 100.0,
+            np.nan,
+        )
+        global_compare["name"] = global_compare["facility_id"].map(facility_names).fillna(global_compare["facility_id"])
+        global_compare["is_improved"] = global_compare["delta_clean"] > 0
+        global_compare["is_worsened"] = global_compare["delta_clean"] < 0
+        global_compare = global_compare[
+            [
+                "facility_id",
+                "name",
+                "I_peak_before",
+                "I_peak_after",
+                "delta",
+                "delta_clean",
+                "delta_pct",
+                "is_improved",
+                "is_worsened",
+            ]
+        ].sort_values("delta_clean", ascending=False)
+        global_compare.to_csv(GLOBAL_BEFORE_AFTER_CSV, index=False, encoding="utf-8")
+        global_facilities_summary = {
+            "facilities_count": int(len(global_compare)),
+            "improved_count": int(global_compare["is_improved"].sum()),
+            "worsened_count": int(global_compare["is_worsened"].sum()),
+            "unchanged_count": int((global_compare["delta_clean"] == 0).sum()),
+            "max_gain": float(global_compare["delta_clean"].max()) if not global_compare.empty else 0.0,
+            "max_drop": float(global_compare["delta_clean"].min()) if not global_compare.empty else 0.0,
+            "mean_delta": float(global_compare["delta_clean"].mean()) if not global_compare.empty else 0.0,
+            "median_delta": float(global_compare["delta_clean"].median()) if not global_compare.empty else 0.0,
+            "metric_epsilon": METRIC_EPS,
+            "global_before_after_csv": str(GLOBAL_BEFORE_AFTER_CSV),
+        }
 
     results = {
         "target_facility_id": PRIMARY_TARGET_ID,
@@ -1193,6 +1235,7 @@ def run() -> None:
             "disabled": optimal_freq_df[optimal_freq_df["optimal_freq"] == 0][["route_id", "delta"]].to_dict("records"),
         },
         "affected_facilities": affected_summary,
+        "global_facilities": global_facilities_summary,
         "run_config": {
             "target_facility_id": PRIMARY_TARGET_ID,
             "target_facility_ids": TARGET_FACILITY_IDS,
