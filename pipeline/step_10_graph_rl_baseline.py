@@ -93,7 +93,8 @@ def run() -> None:
     PPO_N_STEPS = max(1, int(RL_CFG.get("n_steps", 50)))
     LOG_EVERY = max(1, int(RL_CFG.get("log_every", 100)))
     CHECKPOINT_EVERY = max(1, int(RL_CFG.get("checkpoint_every", 500)))
-    MAX_ROUTE_DELTA = max(1, int(RL_CFG.get("max_route_delta", 3)))
+    MAX_ROUTE_DELTA = max(0.0, float(RL_CFG.get("max_route_delta", 3.0)))
+    ACTION_STEP = max(0.01, float(RL_CFG.get("action_step", 1.0)))
     NON_TARGET_HARM_WEIGHT = float(RL_CFG.get("non_target_harm_weight", 1.0))
     NON_TARGET_HARM_TOLERANCE = max(0.0, float(RL_CFG.get("non_target_harm_tolerance", 0.0)))
     METRIC_EPS = max(0.0, float(RL_CFG.get("metric_epsilon", 1e-9)))
@@ -190,7 +191,8 @@ def run() -> None:
             and cached_action_mode == "redistribution_pair"
             and int(cached_run.get("max_steps", -1)) == MAX_STEPS
             and int(cached_run.get("total_timesteps", -1)) == TOTAL_TIMESTEPS
-            and int(cached_run.get("max_route_delta", -1)) == MAX_ROUTE_DELTA
+            and float(cached_run.get("max_route_delta", -1.0)) == MAX_ROUTE_DELTA
+            and float(cached_run.get("action_step", -1.0)) == ACTION_STEP
             and float(cached_run.get("non_target_harm_weight", -1.0)) == NON_TARGET_HARM_WEIGHT
             and float(cached_run.get("non_target_harm_tolerance", -1.0)) == NON_TARGET_HARM_TOLERANCE
             and float(cached_run.get("target_wait_reward_weight", -1.0)) == TARGET_WAIT_REWARD_WEIGHT
@@ -216,6 +218,7 @@ def run() -> None:
         "10_rl: конфіг "
         f"use_subproc={USE_SUBPROC} n_envs={N_ENVS} max_steps={MAX_STEPS} "
         f"total_timesteps={TOTAL_TIMESTEPS} max_route_delta={MAX_ROUTE_DELTA} "
+        f"action_step={ACTION_STEP} "
         f"non_target_harm_weight={NON_TARGET_HARM_WEIGHT} "
         f"non_target_harm_tolerance={NON_TARGET_HARM_TOLERANCE} "
         f"target_wait_reward_weight={TARGET_WAIT_REWARD_WEIGHT} "
@@ -758,17 +761,17 @@ def run() -> None:
 
             if int(self.route_types[receiver_idx]) != transport_type:
                 invalid_action = True
-            elif self.current_freq[donor_idx] - 1.0 < 1.0:
+            elif self.current_freq[donor_idx] - ACTION_STEP < 1.0:
                 invalid_action = True
-            elif self.current_freq[donor_idx] - 1.0 < max(1.0, self.initial_freq[donor_idx] - float(MAX_ROUTE_DELTA)):
+            elif self.current_freq[donor_idx] - ACTION_STEP < max(1.0, self.initial_freq[donor_idx] - MAX_ROUTE_DELTA):
                 invalid_action = True
-            elif self.current_freq[receiver_idx] + 1.0 > 12.0:
+            elif self.current_freq[receiver_idx] + ACTION_STEP > 12.0:
                 invalid_action = True
-            elif self.current_freq[receiver_idx] + 1.0 > min(12.0, self.initial_freq[receiver_idx] + float(MAX_ROUTE_DELTA)):
+            elif self.current_freq[receiver_idx] + ACTION_STEP > min(12.0, self.initial_freq[receiver_idx] + MAX_ROUTE_DELTA):
                 invalid_action = True
             else:
-                self.current_freq[donor_idx] -= 1.0
-                self.current_freq[receiver_idx] += 1.0
+                self.current_freq[donor_idx] -= ACTION_STEP
+                self.current_freq[receiver_idx] += ACTION_STEP
 
             if not invalid_action:
                 affected = transfer_action_affected[action_idx]
@@ -874,7 +877,15 @@ def run() -> None:
     if USE_SUBPROC:
         n_envs = min(N_ENVS, os.cpu_count() or 1)
         print(f"10_rl: запускаємо {n_envs} паралельних середовищ через SubprocVecEnv.")
-        env = SubprocVecEnv([make_env for _ in range(n_envs)])
+        try:
+            env = SubprocVecEnv([make_env for _ in range(n_envs)])
+        except PermissionError as exc:
+            print(
+                "10_rl: SubprocVecEnv недоступний у цьому середовищі "
+                f"({exc}); переходимо на DummyVecEnv."
+            )
+            n_envs = N_ENVS
+            env = DummyVecEnv([make_env for _ in range(n_envs)])
     else:
         n_envs = N_ENVS
         print(f"10_rl: запускаємо {n_envs} середовище(ищ) через DummyVecEnv.")
@@ -1246,6 +1257,7 @@ def run() -> None:
             "learning_rate": LEARNING_RATE,
             "n_steps": PPO_N_STEPS,
             "max_route_delta": MAX_ROUTE_DELTA,
+            "action_step": ACTION_STEP,
             "non_target_harm_weight": NON_TARGET_HARM_WEIGHT,
             "non_target_harm_tolerance": NON_TARGET_HARM_TOLERANCE,
             "target_wait_reward_weight": TARGET_WAIT_REWARD_WEIGHT,

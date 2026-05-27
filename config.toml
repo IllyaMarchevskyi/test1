@@ -76,8 +76,8 @@ n_estimators = 200        # GradientBoostingRegressor
 # над одиночним target_facility_id.
 target_facility_ids = ["H274", "H24", "H340", "H150"]
 target_facility_id = "H274"
-use_subproc = false
-n_envs = 1
+use_subproc = true
+n_envs = 2
 max_steps = 50
 total_timesteps = 50000
 learning_rate = 0.0003
@@ -85,6 +85,7 @@ n_steps = 50
 log_every = 100
 checkpoint_every = 500
 max_route_delta = 3
+action_step = 0.5
 non_target_harm_weight = 1.0
 # Ігноруємо мікроскопічний числовий шум при штрафі за шкоду нецільовим закладам.
 non_target_harm_tolerance = 0.000000001

@@ -59,7 +59,8 @@ def run() -> None:
         raise ValueError("10f_action_probe: потрібно задати target_facility_id або target_facility_ids.")
 
     excluded_transport_types = set(parse_config_list(rl_cfg.get("exclude_transport_types", [])))
-    max_route_delta = max(1, int(rl_cfg.get("max_route_delta", 3)))
+    max_route_delta = max(0.0, float(rl_cfg.get("max_route_delta", 3.0)))
+    action_step = max(0.01, float(rl_cfg.get("action_step", 1.0)))
     non_target_harm_weight = float(rl_cfg.get("non_target_harm_weight", 1.0))
     non_target_harm_tolerance = max(0.0, float(rl_cfg.get("non_target_harm_tolerance", 0.0)))
     target_wait_reward_weight = float(rl_cfg.get("target_wait_reward_weight", 0.0))
@@ -275,8 +276,8 @@ def run() -> None:
     initial_target_mean = float(np.mean([initial_i_peak.get(fid, 0.0) for fid in target_ids]))
     rows = []
     for action_id, (donor_idx, receiver_idx) in enumerate(transfer_actions):
-        donor_after = initial_freq[donor_idx] - 1.0
-        receiver_after = initial_freq[receiver_idx] + 1.0
+        donor_after = initial_freq[donor_idx] - action_step
+        receiver_after = initial_freq[receiver_idx] + action_step
         invalid_reason = ""
         if donor_after < 1.0:
             invalid_reason = "donor_below_1"
@@ -371,6 +372,7 @@ def run() -> None:
         "output_csv": str(OUTPUT_CSV),
         "run_config": {
             "max_route_delta": max_route_delta,
+            "action_step": action_step,
             "non_target_harm_weight": non_target_harm_weight,
             "non_target_harm_tolerance": non_target_harm_tolerance,
             "target_wait_reward_weight": target_wait_reward_weight,
