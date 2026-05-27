@@ -74,10 +74,18 @@ n_estimators = 200        # GradientBoostingRegressor
 # target_facility_id = "H327"
 # Якщо потрібно тестувати групу закладів, список нижче має пріоритет
 # над одиночним target_facility_id.
-target_facility_ids = ["H274", "H24", "H340", "H150"]
-target_facility_id = "H274"
+# target_facility_ids = ["H274", "H24", "H340", "H150"]
+target_facility_id = ""
+# Якщо target_facility_id(s) порожні, 10g автоматично вибирає
+# пріоритетну групу з усіх закладів за найнижчим I_peak.
+target_selection = "bottom_n"
+target_auto_count = 10
+target_auto_min_actions = 6
+target_auto_max_candidates = 250
+target_auto_min_i_peak = 0.000001
+require_osm_mapping = true
 use_subproc = true
-n_envs = 2
+n_envs = 6
 max_steps = 50
 total_timesteps = 50000
 learning_rate = 0.0003
@@ -85,12 +93,13 @@ n_steps = 50
 log_every = 100
 checkpoint_every = 500
 max_route_delta = 3
-action_step = 0.5
+action_step = 0.25
+freq_scaling = "linear"  # "log" або "linear"
 non_target_harm_weight = 1.0
 # Ігноруємо мікроскопічний числовий шум при штрафі за шкоду нецільовим закладам.
 non_target_harm_tolerance = 0.000000001
 metric_epsilon = 0.00000001
 # Додатковий навчальний сигнал за зменшення wait для target. 0.0 = вимкнено.
-target_wait_reward_weight = 0.01
+target_wait_reward_weight = 0.0
 # Для тесту локальніше без метро можна поставити ["metro"].
-exclude_transport_types = ["metro"]
+exclude_transport_types = []

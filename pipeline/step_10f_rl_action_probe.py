@@ -27,6 +27,8 @@ def run() -> None:
     BUILDING_WEIGHTS = PROCESSED_DIR / "building_weights_baseline.parquet"
     EASYWAY_ROUTES = Path("../gtfs_static/easyway_routes.csv")
     EASYWAY_METRO = Path("../gtfs_static/easyway_metro.csv")
+    OSM_EASYWAY_DATA = Path("../gtfs_static/osm_easyway_data.csv")
+    OSM_EASYWAY_METRO_DATA = Path("../gtfs_static/osm_easyway_metro_data.csv")
 
     OUTPUT_CSV = PROCESSED_DIR / "rl_action_probe.csv"
     SUMMARY_JSON = PROCESSED_DIR / "rl_action_probe_summary.json"
@@ -65,6 +67,8 @@ def run() -> None:
     non_target_harm_tolerance = max(0.0, float(rl_cfg.get("non_target_harm_tolerance", 0.0)))
     target_wait_reward_weight = float(rl_cfg.get("target_wait_reward_weight", 0.0))
     metric_epsilon = max(0.0, float(rl_cfg.get("metric_epsilon", 1e-8)))
+    require_osm_mapping = bool(rl_cfg.get("require_osm_mapping", False))
+    freq_scaling = str(rl_cfg.get("freq_scaling", "log")).strip().lower() or "log"
 
     route_to_int = {"bus": 0, "trol": 1, "tram": 2, "metro": 3}
 
@@ -93,9 +97,10 @@ def run() -> None:
         route_stats_full["transport_type"] = route_stats_full["transport"].map(route_to_int).fillna(0).astype(int)
         route_stats_full["rl_initial_freq"] = 6.0
 
-        # Та сама нормалізація, що в 10_rl: log1p + min-max у межах типу транспорту.
+        # Та сама нормалізація, що в 10_rl: log або linear + min-max у межах типу транспорту.
         for _, sub_idx in route_stats_full.groupby("transport").groups.items():
-            raw = np.log1p(route_stats_full.loc[sub_idx, "current_freq"].astype(float))
+            current_freq = route_stats_full.loc[sub_idx, "current_freq"].astype(float)
+            raw = np.log1p(current_freq) if freq_scaling == "log" else current_freq
             min_raw = float(raw.min())
             max_raw = float(raw.max())
             if max_raw > min_raw:
@@ -129,6 +134,22 @@ def run() -> None:
     if EASYWAY_METRO.exists():
         easyway_parts.append(pd.read_csv(EASYWAY_METRO))
     easyway = pd.concat(easyway_parts, ignore_index=True)
+    if require_osm_mapping:
+        osm_parts = []
+        if OSM_EASYWAY_DATA.exists():
+            osm_parts.append(pd.read_csv(OSM_EASYWAY_DATA, usecols=["route_id"]))
+        if OSM_EASYWAY_METRO_DATA.exists():
+            osm_parts.append(pd.read_csv(OSM_EASYWAY_METRO_DATA, usecols=["route_id"]))
+        if not osm_parts:
+            raise FileNotFoundError(
+                "10f_action_probe: require_osm_mapping=true, але osm_easyway_data.csv не знайдено."
+            )
+        allowed_route_ids = set(pd.concat(osm_parts, ignore_index=True)["route_id"].astype(str).unique())
+        easyway["route_id"] = easyway["route_id"].astype(str)
+        before_routes = easyway["route_id"].nunique()
+        easyway = easyway[easyway["route_id"].isin(allowed_route_ids)].copy()
+        after_routes = easyway["route_id"].nunique()
+        print(f"10f_action_probe: OSM route filter {before_routes} -> {after_routes} маршрутів")
     easyway = easyway[easyway["schedules"] != r"\N"].copy()
     easyway["stop_id"] = easyway["stop_id"].astype(str)
     easyway["route_id"] = easyway["route_id"].astype(str)

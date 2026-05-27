@@ -99,6 +99,8 @@ def run() -> None:
     NON_TARGET_HARM_TOLERANCE = max(0.0, float(RL_CFG.get("non_target_harm_tolerance", 0.0)))
     METRIC_EPS = max(0.0, float(RL_CFG.get("metric_epsilon", 1e-9)))
     TARGET_WAIT_REWARD_WEIGHT = float(RL_CFG.get("target_wait_reward_weight", 0.0))
+    REQUIRE_OSM_MAPPING = bool(RL_CFG.get("require_osm_mapping", False))
+    FREQ_SCALING = str(RL_CFG.get("freq_scaling", "log")).strip().lower() or "log"
 
     def parse_config_list(value) -> list[str]:
         if isinstance(value, str):
@@ -233,6 +235,22 @@ def run() -> None:
     if EASYWAY_METRO.exists():
         easyway_parts.append(pd.read_csv(EASYWAY_METRO))
     easyway = pd.concat(easyway_parts, ignore_index=True)
+    if REQUIRE_OSM_MAPPING:
+        osm_parts = []
+        if OSM_BRIDGE_PATH.exists():
+            osm_parts.append(pd.read_csv(OSM_BRIDGE_PATH, usecols=["route_id"]))
+        if OSM_BRIDGE_METRO_PATH.exists():
+            osm_parts.append(pd.read_csv(OSM_BRIDGE_METRO_PATH, usecols=["route_id"]))
+        if not osm_parts:
+            raise FileNotFoundError(
+                "10_rl: require_osm_mapping=true, але osm_easyway_data.csv не знайдено."
+            )
+        allowed_route_ids = set(pd.concat(osm_parts, ignore_index=True)["route_id"].astype(str).unique())
+        easyway["route_id"] = easyway["route_id"].astype(str)
+        before_routes = easyway["route_id"].nunique()
+        easyway = easyway[easyway["route_id"].isin(allowed_route_ids)].copy()
+        after_routes = easyway["route_id"].nunique()
+        print(f"10_rl: OSM route filter {before_routes} -> {after_routes} маршрутів")
     print(
         f"10_rl: index={len(index_df):,} catchment={len(catchment):,} "
         f"entropy={len(entropy):,} weights={len(weights):,} easyway={len(easyway):,}"
@@ -404,8 +422,11 @@ def run() -> None:
         # Нормалізуємо частоти окремо по кожному типу транспорту.
         # Шкала відносна в межах типу: bus/trol/tram/metro не
         # порівнюються напряму між собою за абсолютною частотою.
+        # freq_scaling=log стискає великий розкид частот,
+        # freq_scaling=linear лишає абсолютні співвідношення без log1p.
         for transport_name, sub_idx in route_stats_full.groupby("transport").groups.items():
-            raw = np.log1p(route_stats_full.loc[sub_idx, "current_freq"].astype(float))
+            current_freq = route_stats_full.loc[sub_idx, "current_freq"].astype(float)
+            raw = np.log1p(current_freq) if FREQ_SCALING == "log" else current_freq
             min_raw = float(raw.min())
             max_raw = float(raw.max())
             if max_raw > min_raw:
@@ -414,7 +435,7 @@ def run() -> None:
                 scaled = pd.Series(6.0, index=raw.index)
             route_stats_full.loc[sub_idx, "rl_initial_freq"] = scaled.round(2)
 
-        print("\n=== Нормалізовані частоти маршрутів по типах транспорту ===")
+        print(f"\n=== Нормалізовані частоти маршрутів по типах транспорту ({FREQ_SCALING}) ===")
         print(f"{'Route':>8} | {'raw_freq':>10} | {'rl_freq':>8} | {'type':>6}")
         print("-" * 44)
         top5 = route_stats_full.nlargest(5, "rl_initial_freq")

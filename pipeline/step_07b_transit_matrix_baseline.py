@@ -19,9 +19,12 @@ def run() -> None:
 
     MIN_TRANSIT_MIN = float(cfg["catchment"].get("min_transit_min", 1.5))
     MIN_PER_STOP_SPAN_MIN = float(cfg["catchment"].get("min_per_stop_span_min", 1.0))
+    REQUIRE_OSM_MAPPING = bool(cfg.get("rl", {}).get("require_osm_mapping", False))
 
     EASYWAY_PATH = "../gtfs_static/easyway_routes.csv"
     EASYWAY_METRO_PATH = "../gtfs_static/easyway_metro.csv"
+    OSM_EASYWAY_PATH = "../gtfs_static/osm_easyway_data.csv"
+    OSM_EASYWAY_METRO_PATH = "../gtfs_static/osm_easyway_metro_data.csv"
     PROCESSED_DIR = "./data/processed"
     CACHE_PEAK = f"{PROCESSED_DIR}/stop_reachability_peak_baseline.parquet"
     CACHE_OFFPEAK = f"{PROCESSED_DIR}/stop_reachability_offpeak_baseline.parquet"
@@ -146,6 +149,22 @@ def run() -> None:
         easyway = pd.concat([easyway, easyway_metro], ignore_index=True)
     else:
         print("Baseline 07b: easyway_metro.csv не знайдено, рахуємо без метро.")
+    if REQUIRE_OSM_MAPPING:
+        osm_parts = []
+        if os.path.exists(OSM_EASYWAY_PATH):
+            osm_parts.append(pd.read_csv(OSM_EASYWAY_PATH, usecols=["route_id"]))
+        if os.path.exists(OSM_EASYWAY_METRO_PATH):
+            osm_parts.append(pd.read_csv(OSM_EASYWAY_METRO_PATH, usecols=["route_id"]))
+        if not osm_parts:
+            raise FileNotFoundError(
+                "Baseline 07b: require_osm_mapping=true, але osm_easyway_data.csv не знайдено."
+            )
+        allowed_route_ids = set(pd.concat(osm_parts, ignore_index=True)["route_id"].astype(str).unique())
+        easyway["route_id"] = easyway["route_id"].astype(str)
+        before_routes = easyway["route_id"].nunique()
+        easyway = easyway[easyway["route_id"].isin(allowed_route_ids)].copy()
+        after_routes = easyway["route_id"].nunique()
+        print(f"Baseline 07b: OSM route filter {before_routes} -> {after_routes} маршрутів")
     easyway = easyway[easyway["schedules"] != r"\N"].copy()
     easyway["stop_id"] = easyway["stop_id"].astype(str)
     easyway["times"] = easyway["schedules"].apply(parse_schedules)
@@ -154,6 +173,11 @@ def run() -> None:
     inputs_for_cache = [EASYWAY_PATH]
     if os.path.exists(EASYWAY_METRO_PATH):
         inputs_for_cache.append(EASYWAY_METRO_PATH)
+    if REQUIRE_OSM_MAPPING:
+        if os.path.exists(OSM_EASYWAY_PATH):
+            inputs_for_cache.append(OSM_EASYWAY_PATH)
+        if os.path.exists(OSM_EASYWAY_METRO_PATH):
+            inputs_for_cache.append(OSM_EASYWAY_METRO_PATH)
 
     FORCE_RECOMPUTE = False
     caches_ready = (not FORCE_RECOMPUTE) and all(

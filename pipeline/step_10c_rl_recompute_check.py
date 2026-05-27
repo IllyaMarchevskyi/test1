@@ -41,6 +41,7 @@ def run() -> None:
         raise FileNotFoundError(f"Відсутні входи для 10c_recompute_check: {missing}")
 
     rl_cfg = cfg.get("rl", {})
+    freq_scaling = str(rl_cfg.get("freq_scaling", "log")).strip().lower() or "log"
     target_facility_id = str(rl_cfg.get("target_facility_id", "")).strip() or None
     target_facility_ids_raw = rl_cfg.get("target_facility_ids", [])
     if isinstance(target_facility_ids_raw, str):
@@ -117,7 +118,8 @@ def run() -> None:
     route_stats["current_freq"] = (route_stats["total_departures"] / 11.0).clip(lower=0.0)
     route_stats["rl_initial_freq"] = 6.0
     for _, sub_idx in route_stats.groupby("transport").groups.items():
-        raw = np.log1p(route_stats.loc[sub_idx, "current_freq"].astype(float))
+        current_freq = route_stats.loc[sub_idx, "current_freq"].astype(float)
+        raw = np.log1p(current_freq) if freq_scaling == "log" else current_freq
         min_raw = float(raw.min())
         max_raw = float(raw.max())
         if max_raw > min_raw:

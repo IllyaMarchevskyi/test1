@@ -414,6 +414,7 @@ def run() -> None:
             const waitMin = currentMode === 'peak' ? props.peak_wait_min : props.offpeak_wait_min;
             const transitMin = currentMode === 'peak' ? props.peak_transit_min : props.offpeak_transit_min;
             const walkOutMin = currentMode === 'peak' ? props.peak_walk_out_min : props.offpeak_walk_out_min;
+            const routeId = currentMode === 'peak' ? props.peak_route_id : props.offpeak_route_id;
             const route = currentMode === 'peak' ? props.peak_route : props.offpeak_route;
             const transport = currentMode === 'peak' ? props.peak_transport : props.offpeak_transport;
             const routeOptions = currentMode === 'peak' ? props.peak_route_options : props.offpeak_route_options;
@@ -430,16 +431,18 @@ def run() -> None:
             if (typeof totalMin === 'number') tooltip += '<br>Загальний час: ' + totalMin.toFixed(1) + ' хв';
             tooltip += '<br>Група: ' + group;
             if (mode === 'transit') {{
-                if (routeOptions) {{
-                    tooltip += '<br>Транспорт: ' + routeOptions;
-                }} else if (transport || route) {{
-                    tooltip += '<br>Транспорт: ' + [transport, route].filter(Boolean).join(' ');
+                const chosenRoute = [transport, route].filter(Boolean).join(' ');
+                if (chosenRoute) tooltip += '<br>Обраний маршрут: ' + chosenRoute;
+                if (routeId) tooltip += '<br>route_id: ' + routeId;
+                if (routeOptions && routeOptions !== chosenRoute) {{
+                    tooltip += '<br>Альтернативи: ' + routeOptions;
                 }}
                 if (typeof walkInMin === 'number') tooltip += '<br>До зупинки: ' + walkInMin.toFixed(1) + ' хв';
                 if (typeof waitMin === 'number') tooltip += '<br>Очікування: ' + waitMin.toFixed(1) + ' хв';
                 if (typeof transitMin === 'number') tooltip += '<br>У транспорті: ' + transitMin.toFixed(1) + ' хв';
                 if (typeof walkOutMin === 'number') tooltip += '<br>Від зупинки до закладу: ' + walkOutMin.toFixed(1) + ' хв';
-                if (sourceStop || destStop) tooltip += '<br>Зупинки: ' + [sourceStop, destStop].filter(Boolean).join(' -> ');
+                if (sourceStop) tooltip += '<br>Зупинка посадки: ' + sourceStop;
+                if (destStop) tooltip += '<br>Зупинка виходу: ' + destStop;
             }} else if (mode === 'walk') {{
                 tooltip += '<br>Режим: пішки';
             }}

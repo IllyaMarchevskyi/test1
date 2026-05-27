@@ -32,6 +32,8 @@ def run() -> None:
     RL_RESULTS_JSON = PROCESSED_DIR / "rl_results.json"
     EASYWAY_ROUTES = Path("../gtfs_static/easyway_routes.csv")
     EASYWAY_METRO = Path("../gtfs_static/easyway_metro.csv")
+    OSM_EASYWAY_DATA = Path("../gtfs_static/osm_easyway_data.csv")
+    OSM_EASYWAY_METRO_DATA = Path("../gtfs_static/osm_easyway_metro_data.csv")
 
     RESULTS_JSON = PROCESSED_DIR / "rl_best_probe_results.json"
     TARGET_BEFORE_AFTER_JSON = PROCESSED_DIR / "target_facilities_best_probe_before_after.json"
@@ -66,8 +68,13 @@ def run() -> None:
     single_target = str(rl_cfg.get("target_facility_id", "")).strip()
     if not target_ids and single_target:
         target_ids = [single_target]
-    if not target_ids:
-        raise ValueError("10g_apply_best_probe: потрібно задати target_facility_id або target_facility_ids.")
+    target_selection = str(rl_cfg.get("target_selection", "bottom_n")).strip().lower()
+    target_auto_count = max(1, int(rl_cfg.get("target_auto_count", 10)))
+    target_auto_min_actions = max(1, int(rl_cfg.get("target_auto_min_actions", 6)))
+    target_auto_max_candidates = max(target_auto_count, int(rl_cfg.get("target_auto_max_candidates", 250)))
+    target_auto_min_i_peak = max(0.0, float(rl_cfg.get("target_auto_min_i_peak", 1e-6)))
+    require_osm_mapping = bool(rl_cfg.get("require_osm_mapping", False))
+    freq_scaling = str(rl_cfg.get("freq_scaling", "log")).strip().lower() or "log"
 
     excluded_transport_types = set(parse_config_list(rl_cfg.get("exclude_transport_types", [])))
     max_steps = max(1, int(rl_cfg.get("max_steps", 50)))
@@ -105,9 +112,10 @@ def run() -> None:
         route_stats_full["transport_type"] = route_stats_full["transport"].map(route_to_int).fillna(0).astype(int)
         route_stats_full["rl_initial_freq"] = 6.0
 
-        # Same normalization as 10_rl/10f: relative log-minmax inside each transport type.
+        # Та сама нормалізація, що в 10_rl/10f: log або linear + min-max у межах типу транспорту.
         for _, sub_idx in route_stats_full.groupby("transport").groups.items():
-            raw = np.log1p(route_stats_full.loc[sub_idx, "current_freq"].astype(float))
+            current_freq = route_stats_full.loc[sub_idx, "current_freq"].astype(float)
+            raw = np.log1p(current_freq) if freq_scaling == "log" else current_freq
             min_raw = float(raw.min())
             max_raw = float(raw.max())
             if max_raw > min_raw:
@@ -141,6 +149,25 @@ def run() -> None:
     if EASYWAY_METRO.exists():
         easyway_parts.append(pd.read_csv(EASYWAY_METRO))
     easyway = pd.concat(easyway_parts, ignore_index=True)
+    allowed_route_ids: set[str] | None = None
+    if require_osm_mapping:
+        osm_parts = []
+        if OSM_EASYWAY_DATA.exists():
+            osm_parts.append(pd.read_csv(OSM_EASYWAY_DATA, usecols=["route_id"]))
+        if OSM_EASYWAY_METRO_DATA.exists():
+            osm_parts.append(pd.read_csv(OSM_EASYWAY_METRO_DATA, usecols=["route_id"]))
+        if not osm_parts:
+            raise FileNotFoundError(
+                "10g_apply_best_probe: require_osm_mapping=true, але osm_easyway_data.csv не знайдено."
+            )
+        allowed_route_ids = set(pd.concat(osm_parts, ignore_index=True)["route_id"].astype(str).unique())
+        before_routes = easyway["route_id"].astype(str).nunique()
+        easyway = easyway[easyway["route_id"].astype(str).isin(allowed_route_ids)].copy()
+        after_routes = easyway["route_id"].astype(str).nunique()
+        print(
+            "10g_apply_best_probe: OSM route filter "
+            f"routes={before_routes}->{after_routes}"
+        )
     easyway = easyway[easyway["schedules"] != r"\N"].copy()
     easyway["stop_id"] = easyway["stop_id"].astype(str)
     easyway["route_id"] = easyway["route_id"].astype(str)
@@ -150,6 +177,65 @@ def run() -> None:
     easyway["n_departures"] = easyway["times"].apply(len)
 
     route_stats_full = build_rl_initial_freq(easyway)
+    route_transport_by_id = dict(zip(route_stats_full["route_id"].astype(str), route_stats_full["transport"].astype(str)))
+
+    def eligible_facility_routes(facility_id: str) -> set[str]:
+        records = catchment[
+            catchment["facility_id"].eq(str(facility_id))
+            & catchment["peak_mode"].eq("transit")
+            & catchment["peak_route_id"].notna()
+            & catchment["peak_route_id"].ne("nan")
+            & catchment["peak_route_id"].ne("")
+        ]
+        routes = set(records["peak_route_id"].astype(str).unique().tolist())
+        if allowed_route_ids is not None:
+            routes = {route_id for route_id in routes if route_id in allowed_route_ids}
+        if excluded_transport_types:
+            routes = {
+                route_id
+                for route_id in routes
+                if route_transport_by_id.get(route_id, "unknown") not in excluded_transport_types
+            }
+        return routes
+
+    def action_pairs_count(route_ids: set[str]) -> int:
+        counts: dict[str, int] = {}
+        for route_id in route_ids:
+            transport = route_transport_by_id.get(str(route_id), "unknown")
+            counts[transport] = counts.get(transport, 0) + 1
+        return int(sum(count * (count - 1) for count in counts.values()))
+
+    if not target_ids:
+        if target_selection not in {"bottom_n", "worst", "auto"}:
+            raise ValueError(
+                "10g_apply_best_probe: target_selection має бути bottom_n/worst/auto "
+                "або потрібно явно задати target_facility_id(s)."
+            )
+        selected_ids: list[str] = []
+        selected_routes: set[str] = set()
+        candidates = (
+            index_df[index_df["I_peak"] > target_auto_min_i_peak]
+            .sort_values("I_peak", ascending=True)
+            .head(target_auto_max_candidates)
+        )
+        for row in candidates.itertuples(index=False):
+            facility_id = str(row.facility_id)
+            routes = eligible_facility_routes(facility_id)
+            if not routes:
+                continue
+            selected_ids.append(facility_id)
+            selected_routes.update(routes)
+            if len(selected_ids) >= target_auto_count and action_pairs_count(selected_routes) >= target_auto_min_actions:
+                break
+        if not selected_ids:
+            raise ValueError("10g_apply_best_probe: auto target selection не знайшов закладів з transit-маршрутами.")
+        target_ids = selected_ids
+        print(
+            "10g_apply_best_probe: auto target selection "
+            f"mode={target_selection} count={len(target_ids)} "
+            f"routes={len(selected_routes)} actions={action_pairs_count(selected_routes)} "
+            f"targets={', '.join(target_ids)}"
+        )
 
     target_rows = catchment[catchment["facility_id"].isin(target_ids)].copy()
     route_mask = (
@@ -159,6 +245,8 @@ def run() -> None:
         & target_rows["peak_route_id"].ne("")
     )
     local_route_ids = sorted(target_rows.loc[route_mask, "peak_route_id"].astype(str).unique().tolist())
+    if allowed_route_ids is not None:
+        local_route_ids = [route_id for route_id in local_route_ids if route_id in allowed_route_ids]
     if not local_route_ids:
         raise ValueError(f"10g_apply_best_probe: для target_ids={target_ids} немає transit-маршрутів.")
 
@@ -485,20 +573,30 @@ def run() -> None:
     if RL_RESULTS_JSON.exists():
         try:
             ppo_results = json.loads(RL_RESULTS_JSON.read_text(encoding="utf-8"))
-            ppo_before = float(ppo_results.get("before", {}).get("I_peak_target_mean", 0.0))
-            ppo_after = float(ppo_results.get("after", {}).get("I_peak_target_mean", 0.0))
-            ppo_summary = {
-                "before": ppo_before,
-                "after": ppo_after,
-                "delta": ppo_after - ppo_before,
-                "changed_routes_count": sum(
-                    len(ppo_results.get("route_changes", {}).get(key, []))
-                    for key in ["increased", "decreased", "disabled"]
-                ),
-                "source": str(RL_RESULTS_JSON),
-            }
+            raw_before = ppo_results.get("before", {}).get("I_peak_target_mean")
+            raw_after = ppo_results.get("after", {}).get("I_peak_target_mean")
+            if raw_before is None or raw_after is None:
+                ppo_summary = {
+                    "available": False,
+                    "reason": "rl_results.json is not a target-mode PPO run",
+                    "source": str(RL_RESULTS_JSON),
+                }
+            else:
+                ppo_before = float(raw_before)
+                ppo_after = float(raw_after)
+                ppo_summary = {
+                    "available": True,
+                    "before": ppo_before,
+                    "after": ppo_after,
+                    "delta": ppo_after - ppo_before,
+                    "changed_routes_count": sum(
+                        len(ppo_results.get("route_changes", {}).get(key, []))
+                        for key in ["increased", "decreased", "disabled"]
+                    ),
+                    "source": str(RL_RESULTS_JSON),
+                }
         except Exception as exc:
-            ppo_summary = {"error": str(exc), "source": str(RL_RESULTS_JSON)}
+            ppo_summary = {"available": False, "error": str(exc), "source": str(RL_RESULTS_JSON)}
 
     comparison = {
         "target_facility_ids": target_ids,
@@ -566,6 +664,7 @@ def run() -> None:
             "max_steps": max_steps,
             "max_route_delta": max_route_delta,
             "action_step": action_step,
+            "freq_scaling": freq_scaling,
             "non_target_harm_weight": non_target_harm_weight,
             "non_target_harm_tolerance": non_target_harm_tolerance,
             "target_wait_reward_weight": target_wait_reward_weight,

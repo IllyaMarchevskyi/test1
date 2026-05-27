@@ -13,6 +13,7 @@
 
 
 def run() -> None:
+    from config_loader import cfg
     from pathlib import Path
 
     import numpy as np
@@ -24,6 +25,7 @@ def run() -> None:
     EASYWAY_ROUTES = Path("../gtfs_static/easyway_routes.csv")
     EASYWAY_METRO = Path("../gtfs_static/easyway_metro.csv")
     OUTPUT_CSV = PROCESSED_DIR / "all_routes_weekdays_freq_debug.csv"
+    freq_scaling = str(cfg.get("rl", {}).get("freq_scaling", "log")).strip().lower() or "log"
 
     required = [EASYWAY_ROUTES]
     missing = [str(path) for path in required if not path.exists()]
@@ -68,7 +70,8 @@ def run() -> None:
     summary["current_freq"] = summary["total_departures"] / 11.0
     summary["rl_initial_freq"] = 6.0
     for _, sub_idx in summary.groupby("transport").groups.items():
-        raw = np.log1p(summary.loc[sub_idx, "current_freq"].astype(float))
+        current_freq = summary.loc[sub_idx, "current_freq"].astype(float)
+        raw = np.log1p(current_freq) if freq_scaling == "log" else current_freq
         min_raw = float(raw.min())
         max_raw = float(raw.max())
         if max_raw > min_raw:

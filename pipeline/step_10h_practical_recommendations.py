@@ -28,6 +28,8 @@ def run() -> None:
     GREEDY_RESULTS_JSON = PROCESSED_DIR / "rl_best_probe_results.json"
     EASYWAY_ROUTES = Path("../gtfs_static/easyway_routes.csv")
     EASYWAY_METRO = Path("../gtfs_static/easyway_metro.csv")
+    OSM_EASYWAY_DATA = Path("../gtfs_static/osm_easyway_data.csv")
+    OSM_EASYWAY_METRO_DATA = Path("../gtfs_static/osm_easyway_metro_data.csv")
 
     OUT_CSV = PROCESSED_DIR / "rl_practical_recommendations.csv"
     OUT_JSON = PROCESSED_DIR / "rl_practical_recommendations.json"
@@ -93,6 +95,7 @@ def run() -> None:
     if route_changes.empty:
         raise ValueError("10h_recommendations: optimal_frequencies_best_probe.csv порожній.")
     route_changes["route_id"] = route_changes["route_id"].astype(str)
+    require_osm_mapping = bool(cfg.get("rl", {}).get("require_osm_mapping", False))
 
     target_effects = pd.read_csv(TARGET_BEFORE_AFTER_CSV)
     greedy_results = json.loads(GREEDY_RESULTS_JSON.read_text(encoding="utf-8"))
@@ -101,6 +104,25 @@ def run() -> None:
     if EASYWAY_METRO.exists():
         easyway_parts.append(pd.read_csv(EASYWAY_METRO))
     easyway = pd.concat(easyway_parts, ignore_index=True)
+    if require_osm_mapping:
+        osm_parts = []
+        if OSM_EASYWAY_DATA.exists():
+            osm_parts.append(pd.read_csv(OSM_EASYWAY_DATA, usecols=["route_id"]))
+        if OSM_EASYWAY_METRO_DATA.exists():
+            osm_parts.append(pd.read_csv(OSM_EASYWAY_METRO_DATA, usecols=["route_id"]))
+        if not osm_parts:
+            raise FileNotFoundError(
+                "10h_recommendations: require_osm_mapping=true, але osm_easyway_data.csv не знайдено."
+            )
+        allowed_route_ids = set(pd.concat(osm_parts, ignore_index=True)["route_id"].astype(str).unique())
+        before_count = len(route_changes)
+        route_changes = route_changes[route_changes["route_id"].isin(allowed_route_ids)].copy()
+        dropped_count = before_count - len(route_changes)
+        if dropped_count:
+            print(f"10h_recommendations: відкинуто {dropped_count} маршрут(ів) без OSM mapping.")
+        if route_changes.empty:
+            raise ValueError("10h_recommendations: після OSM-фільтра не лишилось маршрутів для звіту.")
+        easyway = easyway[easyway["route_id"].astype(str).isin(allowed_route_ids)].copy()
     easyway = easyway[easyway["schedules"] != r"\N"].copy()
     easyway["route_id"] = easyway["route_id"].astype(str)
     easyway["transport"] = easyway["transport"].astype(str)
