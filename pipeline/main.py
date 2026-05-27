@@ -30,6 +30,7 @@ STEPS = [
     ("10d_debug", "pipeline.step_10d_all_routes_freq_debug", "All routes weekdays frequency debug"),
     ("10e_group_debug", "pipeline.step_10e_target_group_debug", "RL target group debug"),
     ("10f_action_probe", "pipeline.step_10f_rl_action_probe", "RL one-step action probe"),
+    ("10g_apply_best_probe", "pipeline.step_10g_apply_best_probe", "Apply best RL probe action"),
 ]
 
 STEP_OUTPUTS = {
@@ -123,6 +124,12 @@ STEP_OUTPUTS = {
     "10f_action_probe": [
         PIPELINE_DIR / "data/processed/rl_action_probe.csv",
         PIPELINE_DIR / "data/processed/rl_action_probe_summary.json",
+    ],
+    "10g_apply_best_probe": [
+        PIPELINE_DIR / "data/processed/rl_best_probe_results.json",
+        PIPELINE_DIR / "data/processed/target_facilities_best_probe_before_after.json",
+        PIPELINE_DIR / "data/processed/rl_best_probe_target_before_after.csv",
+        PIPELINE_DIR / "data/processed/optimal_frequencies_best_probe.csv",
     ],
 }
 

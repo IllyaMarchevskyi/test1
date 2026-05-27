@@ -76,10 +76,10 @@ n_estimators = 200        # GradientBoostingRegressor
 # над одиночним target_facility_id.
 target_facility_ids = ["H274", "H24", "H340", "H150"]
 target_facility_id = "H274"
-use_subproc = true
-n_envs = 2
+use_subproc = false
+n_envs = 1
 max_steps = 50
-total_timesteps = 10000
+total_timesteps = 50000
 learning_rate = 0.0003
 n_steps = 50
 log_every = 100
