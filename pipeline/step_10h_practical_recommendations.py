@@ -17,6 +17,7 @@ def run() -> None:
 
     import numpy as np
     import pandas as pd
+    from utils.rl_transfer import transfer_compatibility_for_run
 
     PROCESSED_DIR = Path("./data/processed")
     OUTPUTS_DIR = Path("./data/outputs")
@@ -26,6 +27,7 @@ def run() -> None:
     OPTIMAL_FREQ_CSV = PROCESSED_DIR / "optimal_frequencies_best_probe.csv"
     TARGET_BEFORE_AFTER_CSV = PROCESSED_DIR / "rl_best_probe_target_before_after.csv"
     GREEDY_RESULTS_JSON = PROCESSED_DIR / "rl_best_probe_results.json"
+    DISPATCH_ROUTE_STATS = PROCESSED_DIR / "dispatch_route_stats.csv"
     EASYWAY_ROUTES = Path("../gtfs_static/easyway_routes.csv")
     EASYWAY_METRO = Path("../gtfs_static/easyway_metro.csv")
     OSM_EASYWAY_DATA = Path("../gtfs_static/osm_easyway_data.csv")
@@ -84,12 +86,16 @@ def run() -> None:
             return None
         return period_min / departures
 
-    def inverse_rl_freq(rl_freq: float, min_log: float, max_log: float) -> float:
-        if max_log <= min_log:
-            return float(np.expm1(min_log))
-        normalized = (float(rl_freq) - 1.0) / 11.0
-        normalized = min(1.0, max(0.0, normalized))
-        return float(np.expm1(min_log + normalized * (max_log - min_log)))
+    def inverse_rl_freq(rl_freq: float, min_raw: float, max_raw: float, scaling: str) -> float:
+        if max_raw <= min_raw:
+            raw_value = min_raw
+        else:
+            normalized = (float(rl_freq) - 1.0) / 11.0
+            normalized = min(1.0, max(0.0, normalized))
+            raw_value = min_raw + normalized * (max_raw - min_raw)
+        if scaling == "log":
+            return float(np.expm1(raw_value))
+        return float(max(raw_value, 0.0))
 
     route_changes = pd.read_csv(OPTIMAL_FREQ_CSV)
     if route_changes.empty:
@@ -100,6 +106,41 @@ def run() -> None:
     recommendation_scenario = str(rl_cfg.get("recommendation_scenario", "baseline")).strip() or "baseline"
     allow_cross_type_transfers = bool(rl_cfg.get("allow_cross_type_transfers", False))
     freq_scaling = str(rl_cfg.get("freq_scaling", "log")).strip().lower() or "log"
+    transfer_matrix = transfer_compatibility_for_run(rl_cfg)
+    matrix_allows_cross_type = any(
+        receiver != donor
+        for donor, receivers in transfer_matrix.items()
+        for receiver in receivers
+    )
+    vehicle_capacity = {
+        "bus": 80,
+        "trol": 100,
+        "tram": 160,
+        "metro": 1000,
+    }
+    vehicle_capacity.update(
+        {
+            str(key).strip().lower(): int(value)
+            for key, value in dict(rl_cfg.get("vehicle_capacity", {})).items()
+        }
+    )
+
+    def normalize_route(value: str) -> str:
+        table = str.maketrans(
+            {
+                "а": "a",
+                "А": "a",
+                "д": "d",
+                "Д": "d",
+                "к": "k",
+                "К": "k",
+                "т": "t",
+                "Т": "t",
+                "р": "r",
+                "Р": "r",
+            }
+        )
+        return str(value).replace(" ", "").translate(table).lower()
 
     target_effects = pd.read_csv(TARGET_BEFORE_AFTER_CSV)
     greedy_results = json.loads(GREEDY_RESULTS_JSON.read_text(encoding="utf-8"))
@@ -147,13 +188,18 @@ def run() -> None:
         .reset_index(drop=True)
     )
     route_stats_full["current_freq_model"] = (route_stats_full["total_departures_model"] / 11.0).clip(lower=0.0)
-    route_stats_full["log_model_freq"] = np.log1p(route_stats_full["current_freq_model"].astype(float))
+    route_stats_full["raw_model_freq"] = route_stats_full["current_freq_model"].astype(float)
+    route_stats_full["scaled_model_freq"] = (
+        np.log1p(route_stats_full["raw_model_freq"])
+        if freq_scaling == "log"
+        else route_stats_full["raw_model_freq"]
+    )
 
     transport_scale = {}
     for transport, group in route_stats_full.groupby("transport"):
         transport_scale[str(transport)] = {
-            "min_log": float(group["log_model_freq"].min()),
-            "max_log": float(group["log_model_freq"].max()),
+            "min_raw": float(group["scaled_model_freq"].min()),
+            "max_raw": float(group["scaled_model_freq"].max()),
         }
 
     first_stop_rows = (
@@ -239,25 +285,74 @@ def run() -> None:
     route_stats_full = route_stats_full.merge(route_real_stats, on="route_id", how="left")
     stats_by_route = route_stats_full.set_index("route_id").to_dict(orient="index")
 
+    dispatch_by_key: dict[str, dict] = {}
+    if DISPATCH_ROUTE_STATS.exists():
+        dispatch_df = pd.read_csv(DISPATCH_ROUTE_STATS)
+        if not dispatch_df.empty:
+            dispatch_df["transport"] = dispatch_df["transport"].astype(str)
+            dispatch_df["route"] = dispatch_df["route"].astype(str)
+            dispatch_df["_route_norm"] = dispatch_df["route"].apply(normalize_route)
+            dispatch_df["_key"] = dispatch_df["transport"] + "_" + dispatch_df["_route_norm"]
+            dispatch_by_key = dispatch_df.set_index("_key").to_dict(orient="index")
+    else:
+        print(
+            "10h_recommendations: dispatch_route_stats.csv не знайдено, "
+            "звіт буде використовувати тільки easyway-оцінки."
+        )
+
     recommendations = []
     for row in route_changes.itertuples(index=False):
         route_id = str(row.route_id)
         stats = stats_by_route.get(route_id, {})
         transport = str(getattr(row, "transport", stats.get("transport", "")))
-        scale = transport_scale.get(transport, {"min_log": 0.0, "max_log": 0.0})
+        route_label = str(getattr(row, "route", stats.get("route", "")))
+        dispatch_key = f"{transport}_{normalize_route(route_label)}"
+        dispatch_stats = dispatch_by_key.get(dispatch_key)
+        uses_dispatch = dispatch_stats is not None
+        scale = transport_scale.get(transport, {"min_raw": 0.0, "max_raw": 0.0})
 
-        model_before = inverse_rl_freq(float(row.initial_freq), scale["min_log"], scale["max_log"])
-        model_after = inverse_rl_freq(float(row.after_freq), scale["min_log"], scale["max_log"])
+        model_before = inverse_rl_freq(float(row.initial_freq), scale["min_raw"], scale["max_raw"], freq_scaling)
+        model_after = inverse_rl_freq(float(row.after_freq), scale["min_raw"], scale["max_raw"], freq_scaling)
         intensity_ratio = (model_after / model_before) if model_before > 0 else 1.0
 
-        weekday_before = float(stats.get("weekday_departures_before") or 0.0)
-        peak_before = float(stats.get("peak_departures_before") or 0.0)
-        directions_count = max(1.0, float(stats.get("directions_count") or 1.0))
+        weekday_before = float(
+            dispatch_stats.get("weekday_trips")
+            if dispatch_stats is not None and not pd.isna(dispatch_stats.get("weekday_trips"))
+            else stats.get("weekday_departures_before") or 0.0
+        )
+        peak_before = float(
+            dispatch_stats.get("peak_trips")
+            if dispatch_stats is not None and not pd.isna(dispatch_stats.get("peak_trips"))
+            else stats.get("peak_departures_before") or 0.0
+        )
+        directions_count = max(
+            1.0,
+            float(
+                dispatch_stats.get("directions_count")
+                if dispatch_stats is not None and not pd.isna(dispatch_stats.get("directions_count"))
+                else stats.get("directions_count") or 1.0
+            ),
+        )
+        capacity_per_vehicle = int(
+            dispatch_stats.get("capacity_per_vehicle")
+            if dispatch_stats is not None
+            and not pd.isna(dispatch_stats.get("capacity_per_vehicle"))
+            and int(dispatch_stats.get("capacity_per_vehicle")) > 0
+            else vehicle_capacity.get(transport, 0)
+        )
+        release_count_before = (
+            float(dispatch_stats.get("release_count"))
+            if dispatch_stats is not None and not pd.isna(dispatch_stats.get("release_count"))
+            else None
+        )
 
         weekday_after = weekday_before * intensity_ratio
         peak_after = peak_before * intensity_ratio
         peak_delta = peak_after - peak_before
         weekday_delta = weekday_after - weekday_before
+        peak_capacity_before = peak_before * capacity_per_vehicle
+        peak_capacity_after = peak_after * capacity_per_vehicle
+        peak_capacity_delta = peak_capacity_after - peak_capacity_before
 
         peak_per_direction_before = peak_before / directions_count
         peak_per_direction_after = peak_after / directions_count
@@ -269,8 +364,16 @@ def run() -> None:
             else None
         )
 
-        round_trip = stats.get("round_trip_duration_min")
-        if round_trip is not None and not pd.isna(round_trip) and headway_before and headway_after:
+        round_trip = (
+            dispatch_stats.get("round_trip_duration_min")
+            if dispatch_stats is not None and not pd.isna(dispatch_stats.get("round_trip_duration_min"))
+            else stats.get("round_trip_duration_min")
+        )
+        if release_count_before is not None:
+            vehicles_before = release_count_before
+            vehicles_after = release_count_before * intensity_ratio
+            vehicles_delta = vehicles_after - vehicles_before
+        elif round_trip is not None and not pd.isna(round_trip) and headway_before and headway_after:
             vehicles_before = float(round_trip) / headway_before
             vehicles_after = float(round_trip) / headway_after
             vehicles_delta = vehicles_after - vehicles_before
@@ -294,12 +397,18 @@ def run() -> None:
             {
                 "route_id": route_id,
                 "transport": transport,
-                "route": str(getattr(row, "route", stats.get("route", ""))),
+                "route": route_label,
                 "action": action,
+                "uses_dispatch_schedule": uses_dispatch,
+                "dispatch_source_file": str(dispatch_stats.get("source_file", "")) if dispatch_stats else "",
                 "rl_initial_freq": float(row.initial_freq),
                 "rl_after_freq": float(row.after_freq),
                 "rl_delta": float(row.delta),
                 "estimated_intensity_ratio": intensity_ratio,
+                "capacity_per_vehicle": capacity_per_vehicle,
+                "release_count_before": release_count_before,
+                "release_count_after_est": vehicles_after if release_count_before is not None else None,
+                "release_count_delta_est": vehicles_delta if release_count_before is not None else None,
                 "weekday_departures_before": weekday_before,
                 "weekday_departures_after_est": weekday_after,
                 "weekday_departures_delta_est": weekday_delta,
@@ -307,6 +416,9 @@ def run() -> None:
                 "peak_departures_after_est": peak_after,
                 "peak_departures_delta_est": peak_delta,
                 "peak_departures_delta_rounded": int(round(peak_delta)),
+                "peak_capacity_before_places": peak_capacity_before,
+                "peak_capacity_after_est_places": peak_capacity_after,
+                "peak_capacity_delta_est_places": peak_capacity_delta,
                 "peak_headway_before_min": headway_before,
                 "peak_headway_after_est_min": headway_after,
                 "peak_headway_delta_est_min": headway_delta,
@@ -334,7 +446,10 @@ def run() -> None:
         "scenario": {
             "name": recommendation_scenario,
             "allow_cross_type_transfers": allow_cross_type_transfers,
+            "matrix_allows_cross_type_transfers": matrix_allows_cross_type,
             "freq_scaling": freq_scaling,
+            "transfer_compatibility": transfer_matrix,
+            "vehicle_capacity": vehicle_capacity,
             "interpretation": "сценарна оцінка, а не готовий диспетчерський план",
         },
         "summary": {
@@ -348,8 +463,8 @@ def run() -> None:
         "facility_effects": target_summary,
         "interpretation_notes": [
             "rl_freq є нормалізованою відносною шкалою, а не прямою кількістю рейсів.",
-            "Оцінка рейсів отримана через відносний коефіцієнт зміни інтенсивності і розклад першої зупинки кожного напрямку.",
-            "Оцінка кількості транспортних одиниць є наближеною і базується на медіанній тривалості рейсу між першою та останньою зупинкою.",
+            "Якщо для маршруту є диспетчерський CSV, рейси і випуски беруться з нього; інакше використовується easyway-оцінка.",
+            "Оцінка кількості транспортних одиниць є сценарною: реальний випуск масштабується за коефіцієнтом зміни інтенсивності.",
         ],
     }
     OUT_JSON.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -358,7 +473,8 @@ def run() -> None:
         "# Практичні рекомендації після RL/greedy оптимізації",
         "",
         f"Сценарій: {recommendation_scenario}",
-        f"Cross-type transfer: {'увімкнено' if allow_cross_type_transfers else 'вимкнено'}",
+        f"Cross-type за матрицею: {'увімкнено' if matrix_allows_cross_type else 'вимкнено'}",
+        f"Матриця сумісності: {transfer_matrix}",
         f"Нормалізація частот: {freq_scaling}",
         "",
         f"Цільові заклади: {', '.join(payload['target_facility_ids'])}",
@@ -384,6 +500,7 @@ def run() -> None:
                 "",
                 item["recommendation"],
                 "",
+                f"- Джерело рейсів: {'диспетчерський CSV' if item['uses_dispatch_schedule'] else 'easyway-оцінка'}",
                 f"- RL-шкала: {item['rl_initial_freq']:.2f} -> {item['rl_after_freq']:.2f} ({item['rl_delta']:+.2f})",
                 (
                     f"- Рейси у пік: {item['peak_departures_before']:.1f} -> "
@@ -395,6 +512,12 @@ def run() -> None:
                     f"{format_num(item['peak_headway_before_min'])} хв -> "
                     f"{format_num(item['peak_headway_after_est_min'])} хв "
                     f"({format_num(item['peak_headway_delta_est_min'])} хв)"
+                ),
+                (
+                    f"- Провізна спроможність у пік: "
+                    f"{item['peak_capacity_before_places']:.0f} -> "
+                    f"{item['peak_capacity_after_est_places']:.0f} місць "
+                    f"({item['peak_capacity_delta_est_places']:+.0f})"
                 ),
                 f"- Орієнтовна зміна рухомого складу: {vehicles_text}",
                 "",
@@ -423,7 +546,7 @@ def run() -> None:
             "",
             "- Це сценарна рекомендація, а не готовий диспетчерський план.",
             "- Перерахунок рейсів є наближеним, бо RL працює на нормалізованій шкалі частот.",
-            "- Перед практичним застосуванням потрібно перевірити оборотність, випуск рухомого складу та вплив на пасажиропотік.",
+            "- Перед практичним застосуванням потрібно перевірити водійські зміни, депо, резерв рухомого складу та пасажиропотік.",
             "",
         ]
     )

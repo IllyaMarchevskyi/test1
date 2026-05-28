@@ -31,6 +31,7 @@ STEPS = [
     ("10e_group_debug", "pipeline.step_10e_target_group_debug", "RL target group debug"),
     ("10f_action_probe", "pipeline.step_10f_rl_action_probe", "RL one-step action probe"),
     ("10g_apply_best_probe", "pipeline.step_10g_apply_best_probe", "Apply best RL probe action"),
+    ("10i_dispatch_parser", "pipeline.step_10i_dispatch_parser", "Dispatch schedule parser"),
     ("10h_recommendations", "pipeline.step_10h_practical_recommendations", "Practical RL recommendations"),
 ]
 
@@ -134,6 +135,12 @@ STEP_OUTPUTS = {
         PIPELINE_DIR / "data/processed/rl_best_probe_steps.csv",
         PIPELINE_DIR / "data/processed/rl_greedy_vs_ppo_comparison.json",
         PIPELINE_DIR / "data/outputs/map_catchment_interactive_best_probe_targets.html",
+    ],
+    "10i_dispatch_parser": [
+        PIPELINE_DIR / "data/processed/dispatch_route_stats.csv",
+        PIPELINE_DIR / "data/processed/dispatch_direction_stats.csv",
+        PIPELINE_DIR / "data/processed/dispatch_release_trips.csv",
+        PIPELINE_DIR / "data/processed/dispatch_parse_report.json",
     ],
     "10h_recommendations": [
         PIPELINE_DIR / "data/processed/rl_practical_recommendations.csv",

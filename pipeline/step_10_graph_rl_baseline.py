@@ -20,6 +20,13 @@ def run() -> None:
     import pandas as pd
     from shapely import wkt
     from tqdm.auto import tqdm
+    from utils.rl_transfer import (
+        build_transfer_actions,
+        is_transfer_allowed,
+        load_transfer_compatibility,
+        parse_config_list,
+        transfer_compatibility_for_run,
+    )
 
     warnings.filterwarnings("ignore")
 
@@ -102,14 +109,8 @@ def run() -> None:
     REQUIRE_OSM_MAPPING = bool(RL_CFG.get("require_osm_mapping", False))
     FREQ_SCALING = str(RL_CFG.get("freq_scaling", "log")).strip().lower() or "log"
     ALLOW_CROSS_TYPE_TRANSFERS = bool(RL_CFG.get("allow_cross_type_transfers", False))
+    TRANSFER_COMPATIBILITY = load_transfer_compatibility(RL_CFG)
     REWARD_SCALE = float(RL_CFG.get("reward_scale", 1.0))
-
-    def parse_config_list(value) -> list[str]:
-        if isinstance(value, str):
-            return [part.strip() for part in value.split(",") if part.strip()]
-        if isinstance(value, (list, tuple)):
-            return [str(item).strip() for item in value if str(item).strip()]
-        return []
 
     EXCLUDED_TRANSPORT_TYPES = set(parse_config_list(RL_CFG.get("exclude_transport_types", [])))
     TARGET_FACILITY_ID_RAW = RL_CFG.get("target_facility_id", "")
@@ -203,6 +204,7 @@ def run() -> None:
             and float(cached_run.get("metric_epsilon", -1.0)) == METRIC_EPS
             and str(cached_run.get("freq_scaling", "log")) == FREQ_SCALING
             and bool(cached_run.get("allow_cross_type_transfers", False)) == ALLOW_CROSS_TYPE_TRANSFERS
+            and cached_run.get("transfer_compatibility", {}) == transfer_compatibility_for_run(RL_CFG)
             and float(cached_run.get("reward_scale", 1.0)) == REWARD_SCALE
             and cached_excluded == EXCLUDED_TRANSPORT_TYPES
         )
@@ -232,6 +234,7 @@ def run() -> None:
         f"reward_scale={REWARD_SCALE} "
         f"freq_scaling={FREQ_SCALING} "
         f"allow_cross_type_transfers={ALLOW_CROSS_TYPE_TRANSFERS} "
+        f"transfer_compatibility={transfer_compatibility_for_run(RL_CFG)} "
         f"exclude_transport_types={sorted(EXCLUDED_TRANSPORT_TYPES)}"
     )
     index_df = pd.read_csv(ACCESSIBILITY_INDEX)
@@ -499,28 +502,12 @@ def run() -> None:
     route_stops = easyway.groupby("route_id")["stop_id"].apply(set).to_dict()
     route_ids = route_stats["route_id"].tolist()
     route_index = {route_id: idx for idx, route_id in enumerate(route_ids)}
-    if ALLOW_CROSS_TYPE_TRANSFERS:
-        transfer_actions = [
-            (donor_idx, receiver_idx)
-            for donor_idx in range(len(route_stats))
-            for receiver_idx in range(len(route_stats))
-            if donor_idx != receiver_idx
-        ]
-    else:
-        route_type_to_indices: dict[int, list[int]] = {}
-        for idx, transport_type in enumerate(route_stats["transport_type"].to_numpy(dtype=int)):
-            route_type_to_indices.setdefault(int(transport_type), []).append(idx)
-        transfer_actions = [
-            (donor_idx, receiver_idx)
-            for same_type_indices in route_type_to_indices.values()
-            for donor_idx in same_type_indices
-            for receiver_idx in same_type_indices
-            if donor_idx != receiver_idx
-        ]
+    route_transports = route_stats["transport"].astype(str).tolist()
+    transfer_actions = build_transfer_actions(route_transports, TRANSFER_COMPATIBILITY)
     if not transfer_actions:
         raise ValueError(
             "10_rl: не вдалося побудувати action space перерозподілу. "
-            "Потрібно щонайменше два маршрути одного типу транспорту."
+            "Перевір target-групу або [rl.transfer_compatibility]."
         )
     print(f"10_rl: action space перерозподілу = {len(transfer_actions):,} пар donor→receiver.")
 
@@ -792,11 +779,12 @@ def run() -> None:
         def step(self, action):
             action_idx = int(action)
             donor_idx, receiver_idx = transfer_actions[action_idx]
-            transport_type = int(self.route_types[donor_idx])
+            donor_transport = route_transports[donor_idx]
+            receiver_transport = route_transports[receiver_idx]
 
             invalid_action = False
 
-            if (not ALLOW_CROSS_TYPE_TRANSFERS) and int(self.route_types[receiver_idx]) != transport_type:
+            if not is_transfer_allowed(donor_transport, receiver_transport, TRANSFER_COMPATIBILITY):
                 invalid_action = True
             elif self.current_freq[donor_idx] - ACTION_STEP < 1.0:
                 invalid_action = True
@@ -1302,6 +1290,7 @@ def run() -> None:
             "reward_scale": REWARD_SCALE,
             "freq_scaling": FREQ_SCALING,
             "allow_cross_type_transfers": ALLOW_CROSS_TYPE_TRANSFERS,
+            "transfer_compatibility": transfer_compatibility_for_run(RL_CFG),
             "metric_epsilon": METRIC_EPS,
             "exclude_transport_types": sorted(EXCLUDED_TRANSPORT_TYPES),
             "action_mode": "redistribution_pair",

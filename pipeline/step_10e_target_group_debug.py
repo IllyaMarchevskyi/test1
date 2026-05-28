@@ -17,6 +17,12 @@ def run() -> None:
 
     import numpy as np
     import pandas as pd
+    from utils.rl_transfer import (
+        count_transfer_actions_for_routes,
+        load_transfer_compatibility,
+        parse_config_list,
+        transfer_compatibility_for_run,
+    )
 
     PROCESSED_DIR = Path("./data/processed")
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
@@ -39,13 +45,6 @@ def run() -> None:
 
     rl_cfg = cfg.get("rl", {})
 
-    def parse_config_list(value) -> list[str]:
-        if isinstance(value, str):
-            return [part.strip() for part in value.split(",") if part.strip()]
-        if isinstance(value, (list, tuple)):
-            return [str(item).strip() for item in value if str(item).strip()]
-        return []
-
     target_ids_raw = rl_cfg.get("target_facility_ids", [])
     target_ids = parse_config_list(target_ids_raw)
     single_target = str(rl_cfg.get("target_facility_id", "")).strip()
@@ -58,6 +57,7 @@ def run() -> None:
     target_auto_min_i_peak = max(0.0, float(rl_cfg.get("target_auto_min_i_peak", 1e-6)))
     excluded_transport_types = set(parse_config_list(rl_cfg.get("exclude_transport_types", [])))
     allow_cross_type_transfers = bool(rl_cfg.get("allow_cross_type_transfers", False))
+    transfer_compatibility = load_transfer_compatibility(rl_cfg)
 
     index_df = pd.read_csv(ACCESSIBILITY_INDEX)
     index_df["facility_id"] = index_df["facility_id"].astype(str)
@@ -102,14 +102,7 @@ def run() -> None:
     route_to_facilities = transit.groupby("peak_route_id")["facility_id"].apply(lambda s: set(s.astype(str))).to_dict()
 
     def action_pairs_for_routes(route_ids: set[str]) -> int:
-        if allow_cross_type_transfers:
-            count = len(route_ids)
-            return int(count * (count - 1))
-        counts: dict[str, int] = {}
-        for route_id in route_ids:
-            transport = route_transport.get(str(route_id), "unknown")
-            counts[transport] = counts.get(transport, 0) + 1
-        return int(sum(count * (count - 1) for count in counts.values()))
+        return count_transfer_actions_for_routes(route_ids, route_transport, transfer_compatibility)
 
     def eligible_routes(route_ids: set[str]) -> set[str]:
         if not excluded_transport_types:
@@ -290,6 +283,7 @@ def run() -> None:
         ),
         "exclude_transport_types": sorted(excluded_transport_types),
         "allow_cross_type_transfers": allow_cross_type_transfers,
+        "transfer_compatibility": transfer_compatibility_for_run(rl_cfg),
         "local_routes_all_count": len(target_routes_all),
         "local_routes_count": len(target_routes),
         "metro_routes_count": int(sum(1 for route_id in target_routes if route_transport.get(route_id) == "metro")),

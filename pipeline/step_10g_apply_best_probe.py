@@ -18,6 +18,13 @@ def run() -> None:
     import numpy as np
     import pandas as pd
     from branca.element import Element
+    from utils.rl_transfer import (
+        build_transfer_actions,
+        count_transfer_actions_for_routes,
+        load_transfer_compatibility,
+        parse_config_list,
+        transfer_compatibility_for_run,
+    )
 
     PROCESSED_DIR = Path("./data/processed")
     OUTPUTS_DIR = Path("./data/outputs")
@@ -57,13 +64,6 @@ def run() -> None:
 
     rl_cfg = cfg.get("rl", {})
 
-    def parse_config_list(value) -> list[str]:
-        if isinstance(value, str):
-            return [part.strip() for part in value.split(",") if part.strip()]
-        if isinstance(value, (list, tuple)):
-            return [str(item).strip() for item in value if str(item).strip()]
-        return []
-
     target_ids = parse_config_list(rl_cfg.get("target_facility_ids", []))
     single_target = str(rl_cfg.get("target_facility_id", "")).strip()
     if not target_ids and single_target:
@@ -76,6 +76,7 @@ def run() -> None:
     require_osm_mapping = bool(rl_cfg.get("require_osm_mapping", False))
     freq_scaling = str(rl_cfg.get("freq_scaling", "log")).strip().lower() or "log"
     allow_cross_type_transfers = bool(rl_cfg.get("allow_cross_type_transfers", False))
+    transfer_compatibility = load_transfer_compatibility(rl_cfg)
 
     excluded_transport_types = set(parse_config_list(rl_cfg.get("exclude_transport_types", [])))
     max_steps = max(1, int(rl_cfg.get("max_steps", 50)))
@@ -200,11 +201,7 @@ def run() -> None:
         return routes
 
     def action_pairs_count(route_ids: set[str]) -> int:
-        counts: dict[str, int] = {}
-        for route_id in route_ids:
-            transport = route_transport_by_id.get(str(route_id), "unknown")
-            counts[transport] = counts.get(transport, 0) + 1
-        return int(sum(count * (count - 1) for count in counts.values()))
+        return count_transfer_actions_for_routes(route_ids, route_transport_by_id, transfer_compatibility)
 
     if not target_ids:
         if target_selection not in {"bottom_n", "worst", "auto"}:
@@ -263,25 +260,8 @@ def run() -> None:
     initial_freq = route_stats["rl_initial_freq"].to_numpy(dtype=float)
     base_freq_by_idx = np.maximum(initial_freq.astype(np.float32), 1.0)
     route_types = route_stats["transport_type"].to_numpy(dtype=int)
-
-    if allow_cross_type_transfers:
-        transfer_actions = [
-            (donor_idx, receiver_idx)
-            for donor_idx in range(len(route_stats))
-            for receiver_idx in range(len(route_stats))
-            if donor_idx != receiver_idx
-        ]
-    else:
-        route_type_to_indices: dict[int, list[int]] = {}
-        for idx, transport_type in enumerate(route_types):
-            route_type_to_indices.setdefault(int(transport_type), []).append(idx)
-        transfer_actions = [
-            (donor_idx, receiver_idx)
-            for same_type_indices in route_type_to_indices.values()
-            for donor_idx in same_type_indices
-            for receiver_idx in same_type_indices
-            if donor_idx != receiver_idx
-        ]
+    route_transports = route_stats["transport"].astype(str).tolist()
+    transfer_actions = build_transfer_actions(route_transports, transfer_compatibility)
     if not transfer_actions:
         raise ValueError("10g_apply_best_probe: action space порожній.")
 
@@ -675,6 +655,7 @@ def run() -> None:
             "action_step": action_step,
             "freq_scaling": freq_scaling,
             "allow_cross_type_transfers": allow_cross_type_transfers,
+            "transfer_compatibility": transfer_compatibility_for_run(rl_cfg),
             "non_target_harm_weight": non_target_harm_weight,
             "non_target_harm_tolerance": non_target_harm_tolerance,
             "target_wait_reward_weight": target_wait_reward_weight,
