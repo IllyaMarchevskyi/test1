@@ -25,6 +25,11 @@ def run() -> None:
         parse_config_list,
         transfer_compatibility_for_run,
     )
+    from utils.dispatch_frequency import (
+        apply_dispatch_peak_frequency,
+        build_easyway_route_stats,
+        peak_windows_from_config,
+    )
 
     PROCESSED_DIR = Path("./data/processed")
     OUTPUTS_DIR = Path("./data/outputs")
@@ -35,6 +40,7 @@ def run() -> None:
     CATCHMENT_BUILDINGS = PROCESSED_DIR / "catchment_buildings_baseline.parquet"
     FACILITY_ENTROPY = PROCESSED_DIR / "facility_entropy_baseline.parquet"
     BUILDING_WEIGHTS = PROCESSED_DIR / "building_weights_baseline.parquet"
+    DISPATCH_ROUTE_STATS = PROCESSED_DIR / "dispatch_route_stats.csv"
     MAP_DATA_JSON = PROCESSED_DIR / "map_data_baseline.json"
     RL_RESULTS_JSON = PROCESSED_DIR / "rl_results.json"
     EASYWAY_ROUTES = Path("../gtfs_static/easyway_routes.csv")
@@ -63,6 +69,9 @@ def run() -> None:
         raise FileNotFoundError(f"Відсутні входи для 10g_apply_best_probe: {missing}")
 
     rl_cfg = cfg.get("rl", {})
+    peak_cfg = cfg.get("peak_hours", {})
+    peak_windows = peak_windows_from_config(peak_cfg)
+    total_peak_hours = float(peak_cfg.get("total_peak_hours", 4))
 
     target_ids = parse_config_list(rl_cfg.get("target_facility_ids", []))
     single_target = str(rl_cfg.get("target_facility_id", "")).strip()
@@ -86,6 +95,8 @@ def run() -> None:
     non_target_harm_tolerance = max(0.0, float(rl_cfg.get("non_target_harm_tolerance", 0.0)))
     target_wait_reward_weight = float(rl_cfg.get("target_wait_reward_weight", 0.0))
     metric_epsilon = max(0.0, float(rl_cfg.get("metric_epsilon", 1e-8)))
+    enforce_target_non_worsening = bool(rl_cfg.get("enforce_target_non_worsening", True))
+    target_harm_tolerance = max(0.0, float(rl_cfg.get("target_harm_tolerance", metric_epsilon)))
 
     route_to_int = {"bus": 0, "trol": 1, "tram": 2, "metro": 3}
 
@@ -100,17 +111,17 @@ def run() -> None:
         return sorted(times)
 
     def build_rl_initial_freq(df: pd.DataFrame) -> pd.DataFrame:
-        route_stats_full = (
-            df.groupby("route_id", as_index=False)
-            .agg(
-                transport=("transport", "first"),
-                route=("route", "first"),
-                n_stops=("stop_id", "nunique"),
-                total_departures=("n_departures", "sum"),
-            )
-            .reset_index(drop=True)
+        route_stats_full = build_easyway_route_stats(
+            df,
+            peak_windows,
+            total_peak_hours,
+            group_by_direction=False,
         )
-        route_stats_full["current_freq"] = (route_stats_full["total_departures"] / 11.0).clip(lower=0.0)
+        route_stats_full = apply_dispatch_peak_frequency(
+            route_stats_full,
+            DISPATCH_ROUTE_STATS,
+            total_peak_hours,
+        )
         route_stats_full["transport_type"] = route_stats_full["transport"].map(route_to_int).fillna(0).astype(int)
         route_stats_full["rl_initial_freq"] = 6.0
 
@@ -360,6 +371,17 @@ def run() -> None:
     def target_mean_i(current_freq: np.ndarray) -> float:
         return float(np.mean([recalc_i(fid, current_freq) for fid in target_ids]))
 
+    def target_values(current_freq: np.ndarray) -> dict[str, float]:
+        return {fid: float(recalc_i(fid, current_freq)) for fid in target_ids}
+
+    def target_worsening(values: dict[str, float]) -> tuple[int, float]:
+        deltas = [
+            float(values.get(fid, 0.0) - initial_i_peak.get(fid, 0.0))
+            for fid in target_ids
+        ]
+        worsened = [delta for delta in deltas if delta < -target_harm_tolerance]
+        return len(worsened), min(deltas) if deltas else 0.0
+
     def target_wait_saving(current_freq: np.ndarray) -> float:
         return float(np.mean([facility_wait_saving(fid, current_freq) for fid in target_ids]))
 
@@ -406,12 +428,22 @@ def run() -> None:
         new_freq = current_freq.copy()
         action_affected = facilities_by_route.get(donor_idx, set()) | facilities_by_route.get(receiver_idx, set())
         new_affected = set(affected_facility_ids) | action_affected
+        target_worsened_count = 0
+        target_min_delta = 0.0
         if not invalid_reason:
             new_freq[donor_idx] = donor_after
             new_freq[receiver_idx] = receiver_after
-            new_metrics = objective_value(new_freq, new_affected)
+            new_target_values = target_values(new_freq)
+            target_worsened_count, target_min_delta = target_worsening(new_target_values)
+            if enforce_target_non_worsening and target_worsened_count > 0:
+                invalid_reason = "target_worsening"
+                new_freq = current_freq.copy()
+                new_metrics = current_metrics.copy()
+            else:
+                new_metrics = objective_value(new_freq, new_affected)
         else:
             new_metrics = current_metrics.copy()
+            target_worsened_count, target_min_delta = target_worsening(target_values(new_freq))
 
         donor = route_stats.iloc[donor_idx]
         receiver = route_stats.iloc[receiver_idx]
@@ -447,6 +479,8 @@ def run() -> None:
             "objective_before": float(current_metrics["objective"]),
             "objective_after": float(new_metrics["objective"]),
             "objective_delta": float(new_metrics["objective"] - current_metrics["objective"]),
+            "target_worsened_count": int(target_worsened_count),
+            "target_min_delta_vs_baseline": float(target_min_delta),
             "affected_count": len(new_affected),
             "non_target_affected_count": len(new_affected - target_set),
             "_new_freq": new_freq,
@@ -549,6 +583,7 @@ def run() -> None:
                 "I_peak_after": after,
                 "delta": delta,
                 "delta_pct": delta_pct,
+                "is_worsened": bool(delta < -target_harm_tolerance),
             }
         )
     target_df = pd.DataFrame(target_rows_output)
@@ -557,6 +592,7 @@ def run() -> None:
     target_before_mean = float(target_df["I_peak_before"].mean())
     target_after_mean = float(target_df["I_peak_after"].mean())
     target_delta_mean = target_after_mean - target_before_mean
+    target_worsened_count = int(target_df["is_worsened"].sum()) if "is_worsened" in target_df else 0
 
     ppo_summary = None
     if RL_RESULTS_JSON.exists():
@@ -596,6 +632,7 @@ def run() -> None:
             "delta": target_delta_mean,
             "delta_pct": (target_delta_mean / target_before_mean * 100.0) if target_before_mean else 0.0,
             "changed_routes_count": len(route_changes),
+            "target_worsened_count": target_worsened_count,
         },
         "ppo": ppo_summary,
         "recommendation": "greedy_baseline" if len(step_rows) > 0 and target_delta_mean > 0.0 else "ppo_or_baseline",
@@ -609,6 +646,7 @@ def run() -> None:
         "I_peak_after_mean": target_after_mean,
         "delta_mean": target_delta_mean,
         "delta_pct_mean": (target_delta_mean / target_before_mean * 100.0) if target_before_mean else 0.0,
+        "target_worsened_count": target_worsened_count,
         "facilities": target_rows_output,
         "steps_applied": len(step_rows),
         "route_changes": route_changes,
@@ -644,6 +682,7 @@ def run() -> None:
             "objective": float(current_metrics["objective"] - baseline_metrics["objective"]),
         },
         "steps_applied": len(step_rows),
+        "target_worsened_count": target_worsened_count,
         "route_changes": {
             "increased": [row for row in route_changes if row["delta"] > 0],
             "decreased": [row for row in route_changes if row["delta"] < 0],
@@ -659,6 +698,8 @@ def run() -> None:
             "non_target_harm_weight": non_target_harm_weight,
             "non_target_harm_tolerance": non_target_harm_tolerance,
             "target_wait_reward_weight": target_wait_reward_weight,
+            "enforce_target_non_worsening": enforce_target_non_worsening,
+            "target_harm_tolerance": target_harm_tolerance,
             "metric_epsilon": metric_epsilon,
             "exclude_transport_types": sorted(excluded_transport_types),
         },
@@ -763,7 +804,7 @@ def run() -> None:
     print(
         "10g_apply_best_probe: greedy "
         f"steps={len(step_rows)} target_mean={target_before_mean:.6f}->{target_after_mean:.6f} "
-        f"delta={target_delta_mean:+.10f}"
+        f"delta={target_delta_mean:+.10f} target_worsened={target_worsened_count}"
     )
     if ppo_summary and "delta" in ppo_summary:
         print(

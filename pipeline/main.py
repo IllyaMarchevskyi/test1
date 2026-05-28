@@ -24,6 +24,7 @@ STEPS = [
     ("08c_missing_names", "pipeline.step_08c_missing_names_map", "Facilities with missing names map"),
     ("09_index", "pipeline.step_09_accessibility_index_baseline", "Baseline accessibility index"),
     ("09_validate", "pipeline.step_09b_validate_index_baseline", "Baseline accessibility validation"),
+    ("10i_dispatch_parser", "pipeline.step_10i_dispatch_parser", "Dispatch schedule parser"),
     ("10_rl", "pipeline.step_10_graph_rl_baseline", "Baseline graph RL"),
     ("10b_debug", "pipeline.step_10b_h327_route_debug", "H327 local route schedule debug"),
     ("10c_check", "pipeline.step_10c_rl_recompute_check", "RL baseline vs recompute check"),
@@ -31,7 +32,6 @@ STEPS = [
     ("10e_group_debug", "pipeline.step_10e_target_group_debug", "RL target group debug"),
     ("10f_action_probe", "pipeline.step_10f_rl_action_probe", "RL one-step action probe"),
     ("10g_apply_best_probe", "pipeline.step_10g_apply_best_probe", "Apply best RL probe action"),
-    ("10i_dispatch_parser", "pipeline.step_10i_dispatch_parser", "Dispatch schedule parser"),
     ("10h_recommendations", "pipeline.step_10h_practical_recommendations", "Practical RL recommendations"),
 ]
 

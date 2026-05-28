@@ -27,6 +27,11 @@ def run() -> None:
         parse_config_list,
         transfer_compatibility_for_run,
     )
+    from utils.dispatch_frequency import (
+        apply_dispatch_peak_frequency,
+        build_easyway_route_stats,
+        peak_windows_from_config,
+    )
 
     warnings.filterwarnings("ignore")
 
@@ -63,6 +68,7 @@ def run() -> None:
     CATCHMENT_BUILDINGS = PROCESSED_DIR / "catchment_buildings_baseline.parquet"
     FACILITY_ENTROPY = PROCESSED_DIR / "facility_entropy_baseline.parquet"
     BUILDING_WEIGHTS = PROCESSED_DIR / "building_weights_baseline.parquet"
+    DISPATCH_ROUTE_STATS = PROCESSED_DIR / "dispatch_route_stats.csv"
     EASYWAY_ROUTES = Path("../gtfs_static/easyway_routes.csv")
     EASYWAY_METRO = Path("../gtfs_static/easyway_metro.csv")
     SCORES_PATH = Path("../data/processed/accessibility_scores.csv")
@@ -92,6 +98,8 @@ def run() -> None:
     TARGETS_ROUTE_CHANGES_PNG = OUTPUTS_DIR / "rl_targets_route_changes.png"
     TARGETS_WAIT_SCATTER_PNG = OUTPUTS_DIR / "rl_targets_wait_before_after_scatter.png"
     RL_CFG = cfg.get("rl", {})
+    TOTAL_PEAK_HOURS = float(cfg.get("peak_hours", {}).get("total_peak_hours", 4))
+    PEAK_WINDOWS = peak_windows_from_config(cfg.get("peak_hours", {}))
     USE_SUBPROC = bool(RL_CFG.get("use_subproc", False))
     N_ENVS = max(1, int(RL_CFG.get("n_envs", 1)))
     MAX_STEPS = max(1, int(RL_CFG.get("max_steps", 50)))
@@ -415,17 +423,17 @@ def run() -> None:
             )
 
     def build_rl_initial_freq(df: pd.DataFrame) -> pd.DataFrame:
-        route_stats_full = (
-            df.groupby("route_id", as_index=False)
-            .agg(
-                transport=("transport", "first"),
-                route=("route", "first"),
-                n_stops=("stop_id", "nunique"),
-                total_departures=("n_departures", "sum"),
-            )
-            .reset_index(drop=True)
+        route_stats_full = build_easyway_route_stats(
+            df,
+            PEAK_WINDOWS,
+            TOTAL_PEAK_HOURS,
+            group_by_direction=False,
         )
-        route_stats_full["current_freq"] = (route_stats_full["total_departures"] / 11.0).clip(lower=0.0)
+        route_stats_full = apply_dispatch_peak_frequency(
+            route_stats_full,
+            DISPATCH_ROUTE_STATS,
+            TOTAL_PEAK_HOURS,
+        )
         route_stats_full["transport_type"] = route_stats_full["transport"].map(route_to_int).fillna(0).astype(int)
         route_stats_full["active"] = 1
         route_stats_full["rl_initial_freq"] = 6.0
@@ -1435,9 +1443,9 @@ def run() -> None:
             f"{float(val):+.2f}",
             ha="center", va="bottom", fontsize=10, fontweight="bold",
         )
-    ax.set_title("Топ-10 маршрутів за зміною частоти рейсів/год", fontsize=14, fontweight="bold")
+    ax.set_title("Топ-10 маршрутів за зміною нормалізованої RL-інтенсивності", fontsize=14, fontweight="bold")
     ax.set_xlabel("Маршрут (вид транспорту + номер)", fontsize=12)
-    ax.set_ylabel("Δ частоти (рейс/год)", fontsize=12)
+    ax.set_ylabel("Δ RL-інтенсивності", fontsize=12)
     ax.grid(True, axis="y", alpha=0.3)
     fig.tight_layout()
     fig.savefig(TOP_CHANGES_PNG, dpi=150)
@@ -1463,7 +1471,7 @@ def run() -> None:
             fontsize=14, fontweight="bold",
         )
         ax.set_xlabel("Маршрут (вид транспорту + номер)", fontsize=12)
-        ax.set_ylabel("Δ частоти (рейс/год)", fontsize=12)
+        ax.set_ylabel("Δ RL-інтенсивності", fontsize=12)
         ax.grid(True, axis="y", alpha=0.3)
         fig.tight_layout()
         fig.savefig(TARGETS_ROUTE_CHANGES_PNG, dpi=150)

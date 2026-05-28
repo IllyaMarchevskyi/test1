@@ -3,6 +3,9 @@
 
 Computes route diversity entropy H(f) / H_max for each facility
 separately for peak and offpeak windows.
+
+Counts named departures_* are stop-level service events at representative
+nearby stops, not full route trips.
 """
 
 
@@ -52,10 +55,10 @@ def run() -> None:
     offpeak_end = hhmm_to_sec(cfg["offpeak_hours"]["end"])
 
     def in_peak(sec: int) -> bool:
-        return any(start <= sec <= end for start, end in peak_windows)
+        return any(start <= sec < end for start, end in peak_windows)
 
     def in_offpeak(sec: int) -> bool:
-        return offpeak_start <= sec <= offpeak_end
+        return offpeak_start <= sec < offpeak_end
 
     def parse_schedules(value: str) -> list[int]:
         times = []
@@ -69,19 +72,21 @@ def run() -> None:
 
     def entropy_stats(route_counts: dict[str, int]) -> tuple[float, float, float, int, int]:
         positive = {route: count for route, count in route_counts.items() if count > 0}
-        total_departures = sum(positive.values())
+        # Це stop-level відправлення з репрезентативних найближчих зупинок,
+        # а не повні рейси маршруту від кінцевої до кінцевої.
+        total_stop_departures = sum(positive.values())
         n_routes = len(positive)
-        if total_departures <= 0 or n_routes == 0:
+        if total_stop_departures <= 0 or n_routes == 0:
             return 0.0, 0.0, 0.0, 0, 0
 
         entropy = 0.0
         for count in positive.values():
-            p_r = count / total_departures
+            p_r = count / total_stop_departures
             entropy -= p_r * math.log2(p_r)
 
         h_max = math.log2(n_routes) if n_routes > 1 else 0.0
         h_norm = (entropy / h_max) if h_max > 0 else 0.0
-        return entropy, h_max, h_norm, n_routes, total_departures
+        return entropy, h_max, h_norm, n_routes, total_stop_departures
 
     print("08b_base: завантажуємо nearby stops для закладів...")
     stop_fac_exit = pd.read_parquet(STOP_FAC_EXIT_PATH)
@@ -142,8 +147,8 @@ def run() -> None:
             peak_counts = {}
             offpeak_counts = {}
 
-        h_peak, hmax_peak, hnorm_peak, n_routes_peak, departures_peak = entropy_stats(peak_counts)
-        h_offpeak, hmax_offpeak, hnorm_offpeak, n_routes_offpeak, departures_offpeak = entropy_stats(offpeak_counts)
+        h_peak, hmax_peak, hnorm_peak, n_routes_peak, stop_departures_peak = entropy_stats(peak_counts)
+        h_offpeak, hmax_offpeak, hnorm_offpeak, n_routes_offpeak, stop_departures_offpeak = entropy_stats(offpeak_counts)
 
         results.append(
             {
@@ -156,8 +161,11 @@ def run() -> None:
                 "Hnorm_offpeak": hnorm_offpeak,
                 "n_routes_peak": n_routes_peak,
                 "n_routes_offpeak": n_routes_offpeak,
-                "departures_peak": departures_peak,
-                "departures_offpeak": departures_offpeak,
+                "stop_departures_peak": stop_departures_peak,
+                "stop_departures_offpeak": stop_departures_offpeak,
+                # Deprecated aliases for compatibility with older notebooks/reports.
+                "departures_peak": stop_departures_peak,
+                "departures_offpeak": stop_departures_offpeak,
             }
         )
 
@@ -179,6 +187,8 @@ def run() -> None:
             "Hnorm_offpeak",
             "n_routes_peak",
             "n_routes_offpeak",
+            "stop_departures_peak",
+            "stop_departures_offpeak",
             "departures_peak",
             "departures_offpeak",
         ]
@@ -202,7 +212,7 @@ def run() -> None:
         print(
             f"  {str(row.name)[:52]:<52} "
             f"{row.facility_type[:6]:<6} H={row.Hnorm_peak:.3f} "
-            f"routes={int(row.n_routes_peak)} dep={int(row.departures_peak)}"
+            f"routes={int(row.n_routes_peak)} stop_dep={int(row.stop_departures_peak)}"
         )
 
     print("\nТоп-5 закладів за Hnorm_offpeak:")
@@ -211,7 +221,7 @@ def run() -> None:
         print(
             f"  {str(row.name)[:52]:<52} "
             f"{row.facility_type[:6]:<6} H={row.Hnorm_offpeak:.3f} "
-            f"routes={int(row.n_routes_offpeak)} dep={int(row.departures_offpeak)}"
+            f"routes={int(row.n_routes_offpeak)} stop_dep={int(row.stop_departures_offpeak)}"
         )
 
 

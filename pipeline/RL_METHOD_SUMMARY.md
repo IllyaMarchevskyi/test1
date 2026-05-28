@@ -29,7 +29,9 @@ gtfs_static/osm_easyway_data.csv
 gtfs_static/osm_easyway_metro_data.csv
 ```
 
-`easyway_routes.csv` використовується як джерело розкладів і частот.
+`easyway_routes.csv` / `easyway_metro.csv` використовуються як fallback-джерело розкладів і модельної інтенсивності.
+
+`pipeline/transports/bus/*.csv` та `pipeline/transports/trol/*.csv` використовуються як диспетчерські розклади для автобусів і тролейбусів, коли такі файли доступні.
 
 `osm_easyway_data.csv` використовується як фільтр валідності маршрутів. Якщо в `config.toml` задано:
 
@@ -41,13 +43,21 @@ require_osm_mapping = true
 
 ## 3. Як рахується початкова частота маршруту
 
-Для кожного маршруту рахується:
+Для автобусів і тролейбусів, якщо є диспетчерський CSV, початкова фізична інтенсивність рахується так:
 
 ```text
-current_freq = total_departures / 11
+current_freq_per_hour = peak_trips / total_peak_hours
 ```
 
-де `total_departures` це кількість відправлень у розкладі, а `11` використовується як умовна тривалість активного періоду в годинах.
+де `peak_trips` це кількість повних рейсів маршруту в пікові вікна `[07:00, 09:00)` та `[17:00, 19:00)`, а `total_peak_hours = 4`.
+
+Для метро або маршрутів без диспетчерського CSV використовується fallback з EasyWay:
+
+```text
+current_freq_per_hour = easyway_peak_departures_from_first_stops / total_peak_hours
+```
+
+Тобто беруться пікові відправлення з першої зупинки кожного напрямку, а не сума часових записів по всіх зупинках. Стару логіку `total_departures / 11` прибрано, бо вона множила один рейс на кількість зупинок і завищувала інтенсивність.
 
 Далі частота переводиться в RL-шкалу `1..12`. Це не реальні рейси на годину, а нормалізована інтенсивність для алгоритму.
 
@@ -227,6 +237,15 @@ non_target_harm = сума погіршень по нецільових закл
 ```text
 objective = delta_target - non_target_harm_weight * non_target_harm
 ```
+
+Для greedy baseline додано hard-constraint:
+
+```toml
+enforce_target_non_worsening = true
+target_harm_tolerance = 0.00000001
+```
+
+Якщо дія покращує середнє по target-групі, але погіршує хоча б один target-заклад більше ніж на `target_harm_tolerance`, така дія не приймається.
 
 Для PPO додано масштабування reward:
 

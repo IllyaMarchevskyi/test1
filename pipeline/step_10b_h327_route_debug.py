@@ -13,14 +13,25 @@ def run() -> None:
 
     import numpy as np
     import pandas as pd
+    from utils.dispatch_frequency import (
+        apply_dispatch_peak_frequency,
+        build_easyway_route_stats,
+        peak_windows_from_config,
+    )
 
     PROCESSED_DIR = Path("./data/processed")
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
     TARGET_FACILITY_ID = str(cfg.get("rl", {}).get("target_facility_id", "")).strip() or "H327"
+    rl_cfg = cfg.get("rl", {})
+    peak_cfg = cfg.get("peak_hours", {})
+    peak_windows = peak_windows_from_config(peak_cfg)
+    total_peak_hours = float(peak_cfg.get("total_peak_hours", 4))
+    freq_scaling = str(rl_cfg.get("freq_scaling", "log")).strip().lower() or "log"
     CATCHMENT_BUILDINGS = PROCESSED_DIR / "catchment_buildings_baseline.parquet"
     EASYWAY_ROUTES = Path("../gtfs_static/easyway_routes.csv")
     EASYWAY_METRO = Path("../gtfs_static/easyway_metro.csv")
+    DISPATCH_ROUTE_STATS = PROCESSED_DIR / "dispatch_route_stats.csv"
 
     SUMMARY_CSV = PROCESSED_DIR / "h327_route_schedule_debug.csv"
     STOPS_CSV = PROCESSED_DIR / "h327_route_schedule_stops_debug.csv"
@@ -90,19 +101,22 @@ def run() -> None:
     easyway["times"] = easyway["schedules"].apply(parse_times)
     easyway["n_departures"] = easyway["times"].apply(len)
 
-    route_freq_base = (
-        easyway[easyway["calendar"].str.strip().str.lower() == "weekdays"]
-        .groupby("route_id", as_index=False)
-        .agg(
-            transport=("transport", "first"),
-            total_departures=("n_departures", "sum"),
-        )
-        .reset_index(drop=True)
+    weekdays = easyway[easyway["calendar"].str.strip().str.lower() == "weekdays"].copy()
+    route_freq_base = build_easyway_route_stats(
+        weekdays,
+        peak_windows,
+        total_peak_hours,
+        group_by_direction=False,
     )
-    route_freq_base["current_freq"] = route_freq_base["total_departures"] / 11.0
+    route_freq_base = apply_dispatch_peak_frequency(
+        route_freq_base,
+        DISPATCH_ROUTE_STATS,
+        total_peak_hours,
+    )
     route_freq_base["rl_initial_freq"] = 6.0
     for _, sub_idx in route_freq_base.groupby("transport").groups.items():
-        raw = np.log1p(route_freq_base.loc[sub_idx, "current_freq"].astype(float))
+        current_freq = route_freq_base.loc[sub_idx, "current_freq"].astype(float)
+        raw = np.log1p(current_freq) if freq_scaling == "log" else current_freq
         min_raw = float(raw.min())
         max_raw = float(raw.max())
         if max_raw > min_raw:
@@ -111,6 +125,10 @@ def run() -> None:
             scaled = pd.Series(6.0, index=raw.index)
         route_freq_base.loc[sub_idx, "rl_initial_freq"] = scaled.round(2)
     rl_freq_map = dict(zip(route_freq_base["route_id"], route_freq_base["rl_initial_freq"]))
+    current_freq_map = dict(zip(route_freq_base["route_id"], route_freq_base["current_freq"]))
+    freq_source_map = dict(zip(route_freq_base["route_id"], route_freq_base["current_freq_source"]))
+    dispatch_peak_map = dict(zip(route_freq_base["route_id"], route_freq_base.get("dispatch_peak_trips", pd.Series(dtype=float))))
+    easyway_peak_map = dict(zip(route_freq_base["route_id"], route_freq_base.get("easyway_peak_departures", pd.Series(dtype=float))))
 
     route_df = easyway[easyway["route_id"].isin(local_routes)].copy()
     if route_df.empty:
@@ -202,7 +220,18 @@ def run() -> None:
                     "calendar": calendar,
                     "n_stops": int(group["stop_id"].nunique()),
                     "total_departures": int(group["n_departures"].sum()),
-                    "current_freq": float(group["n_departures"].sum() / 11.0),
+                    "current_freq_per_hour": float(current_freq_map.get(route_id, 0.0)),
+                    "current_freq_source": str(freq_source_map.get(route_id, "unknown")),
+                    "route_peak_trips": (
+                        None
+                        if pd.isna(dispatch_peak_map.get(route_id, pd.NA))
+                        else float(dispatch_peak_map.get(route_id))
+                    ),
+                    "easyway_peak_departures": (
+                        None
+                        if pd.isna(easyway_peak_map.get(route_id, pd.NA))
+                        else float(easyway_peak_map.get(route_id))
+                    ),
                     "rl_initial_freq": float(rl_freq_map.get(route_id, 6.0)),
                     "first_stop_name": str(first_stop_row["stop_name"]),
                     "last_stop_name": str(last_stop_row["stop_name"]),
@@ -230,11 +259,18 @@ def run() -> None:
 
     print(f"10b_debug: summary -> {SUMMARY_CSV}")
     print(f"10b_debug: stops   -> {STOPS_CSV}")
-    print("10b_debug: weekdays current_freq -> rl_initial_freq:")
+    print("10b_debug: weekdays current_freq_per_hour -> rl_initial_freq:")
     for row in summary_df.itertuples(index=False):
+        peak_part = ""
+        if row.route_peak_trips is not None and not pd.isna(row.route_peak_trips):
+            peak_part = f", route_peak_trips={float(row.route_peak_trips):.0f}"
+        elif row.easyway_peak_departures is not None and not pd.isna(row.easyway_peak_departures):
+            peak_part = f", easyway_peak_departures={float(row.easyway_peak_departures):.0f}"
         print(
             f"  {row.route_id} ({row.transport} {row.route}, {row.direction}, {row.calendar}) | "
-            f"current_freq={row.current_freq:.2f} -> rl_initial_freq={float(row.rl_initial_freq):.2f}"
+            f"source={row.current_freq_source}, "
+            f"current_freq_per_hour={row.current_freq_per_hour:.2f}{peak_part} "
+            f"-> rl_initial_freq={float(row.rl_initial_freq):.2f}"
         )
 
     suspicious = summary_df[summary_df["issue_flags"].astype(str) != ""].copy()
@@ -245,7 +281,7 @@ def run() -> None:
             print(
                 f"  {row.route_id} ({row.transport} {row.route}, {row.direction}, {row.calendar}) | "
                 f"stops={row.n_stops}, departures={row.total_departures}, "
-                f"freq={row.current_freq:.2f}, first={row.first_stop_name}, last={row.last_stop_name}, "
+                f"freq_per_hour={row.current_freq_per_hour:.2f}, first={row.first_stop_name}, last={row.last_stop_name}, "
                 f"time={row.first_time}-{row.last_time}, issues={row.issue_flags}"
             )
     else:

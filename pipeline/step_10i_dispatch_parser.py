@@ -214,6 +214,7 @@ def run() -> None:
             ]
             starts_inside_route = first_idx > 0
             ends_inside_route = last_idx < len(stop_names) - 1
+            is_full_route_trip = first_idx == 0 and last_idx == len(stop_names) - 1
             peak_flag = is_peak(start_s)
 
             trip_rows.append(
@@ -238,6 +239,7 @@ def run() -> None:
                     "control_points_count": len(control_points),
                     "starts_inside_route": starts_inside_route,
                     "ends_inside_route": ends_inside_route,
+                    "is_full_route_trip": is_full_route_trip,
                     "has_depot_marker": bool(depot_points),
                     "depot_markers": ", ".join(sorted(set(depot_points))),
                     "is_peak_trip": peak_flag,
@@ -264,7 +266,11 @@ def run() -> None:
                     "direction_name": str(group["direction_name"].iloc[0]),
                     "release_count": int(group["release_id"].nunique()),
                     "trip_count": int(len(group)),
-                    "peak_trip_count": int(group["is_peak_trip"].sum()),
+                    "full_trip_count": int(group["is_full_route_trip"].sum()),
+                    "peak_trip_count": int((group["is_peak_trip"] & group["is_full_route_trip"]).sum()),
+                    "scheduled_run_count": int(len(group)),
+                    "peak_scheduled_run_count": int(group["is_peak_trip"].sum()),
+                    "partial_run_count": int((~group["is_full_route_trip"]).sum()),
                     "first_time": fmt_time(float(group["start_seconds"].min())),
                     "last_time": fmt_time(float(group["start_seconds"].max())),
                     "median_one_way_duration_min": float(group["duration_min"].median()),
@@ -287,8 +293,10 @@ def run() -> None:
         else:
             round_trip_duration = float(direction_df["median_one_way_duration_min"].iloc[0] * 2.0)
 
-        peak_trips = int(route_df["is_peak_trip"].sum())
-        weekday_trips = int(len(route_df))
+        peak_scheduled_runs = int(route_df["is_peak_trip"].sum())
+        weekday_scheduled_runs = int(len(route_df))
+        peak_trips = int((route_df["is_peak_trip"] & route_df["is_full_route_trip"]).sum())
+        weekday_trips = int(route_df["is_full_route_trip"].sum())
         release_count = int(route_df["release_id"].nunique())
         capacity = int(vehicle_capacity.get(file_transport, 0))
         route_rows.append(
@@ -302,8 +310,11 @@ def run() -> None:
                 "directions_count": int(route_df["direction_index"].nunique()),
                 "release_count": release_count,
                 "release_ids": ", ".join(str(x) for x in sorted(route_df["release_id"].unique())),
+                "weekday_scheduled_runs": weekday_scheduled_runs,
+                "peak_scheduled_runs": peak_scheduled_runs,
                 "weekday_trips": weekday_trips,
                 "peak_trips": peak_trips,
+                "partial_runs": weekday_scheduled_runs - weekday_trips,
                 "offpeak_or_other_trips": weekday_trips - peak_trips,
                 "first_trip_time": fmt_time(float(route_df["start_seconds"].min())),
                 "last_trip_time": fmt_time(float(route_df["start_seconds"].max())),

@@ -24,6 +24,11 @@ def run() -> None:
         parse_config_list,
         transfer_compatibility_for_run,
     )
+    from utils.dispatch_frequency import (
+        apply_dispatch_peak_frequency,
+        build_easyway_route_stats,
+        peak_windows_from_config,
+    )
 
     PROCESSED_DIR = Path("./data/processed")
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
@@ -32,6 +37,7 @@ def run() -> None:
     CATCHMENT_BUILDINGS = PROCESSED_DIR / "catchment_buildings_baseline.parquet"
     FACILITY_ENTROPY = PROCESSED_DIR / "facility_entropy_baseline.parquet"
     BUILDING_WEIGHTS = PROCESSED_DIR / "building_weights_baseline.parquet"
+    DISPATCH_ROUTE_STATS = PROCESSED_DIR / "dispatch_route_stats.csv"
     EASYWAY_ROUTES = Path("../gtfs_static/easyway_routes.csv")
     EASYWAY_METRO = Path("../gtfs_static/easyway_metro.csv")
     OSM_EASYWAY_DATA = Path("../gtfs_static/osm_easyway_data.csv")
@@ -52,6 +58,9 @@ def run() -> None:
         raise FileNotFoundError(f"Відсутні входи для 10f_action_probe: {missing}")
 
     rl_cfg = cfg.get("rl", {})
+    peak_cfg = cfg.get("peak_hours", {})
+    peak_windows = peak_windows_from_config(peak_cfg)
+    total_peak_hours = float(peak_cfg.get("total_peak_hours", 4))
 
     target_ids = parse_config_list(rl_cfg.get("target_facility_ids", []))
     single_target = str(rl_cfg.get("target_facility_id", "")).strip()
@@ -88,17 +97,17 @@ def run() -> None:
         return sorted(times)
 
     def build_rl_initial_freq(df: pd.DataFrame) -> pd.DataFrame:
-        route_stats_full = (
-            df.groupby("route_id", as_index=False)
-            .agg(
-                transport=("transport", "first"),
-                route=("route", "first"),
-                n_stops=("stop_id", "nunique"),
-                total_departures=("n_departures", "sum"),
-            )
-            .reset_index(drop=True)
+        route_stats_full = build_easyway_route_stats(
+            df,
+            peak_windows,
+            total_peak_hours,
+            group_by_direction=False,
         )
-        route_stats_full["current_freq"] = (route_stats_full["total_departures"] / 11.0).clip(lower=0.0)
+        route_stats_full = apply_dispatch_peak_frequency(
+            route_stats_full,
+            DISPATCH_ROUTE_STATS,
+            total_peak_hours,
+        )
         route_stats_full["transport_type"] = route_stats_full["transport"].map(route_to_int).fillna(0).astype(int)
         route_stats_full["rl_initial_freq"] = 6.0
 

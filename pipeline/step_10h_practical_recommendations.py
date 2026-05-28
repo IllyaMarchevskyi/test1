@@ -2,8 +2,8 @@
 10h Practical RL recommendations.
 
 Converts greedy RL route-frequency changes into a transport-facing report:
-estimated weekday/peak departures, headway changes, and approximate vehicle
-resource changes for the target-facility scenario.
+estimated full scheduled trips, headway changes, carrying capacity, and
+approximate vehicle resource changes for the target-facility scenario.
 """
 
 from __future__ import annotations
@@ -86,17 +86,6 @@ def run() -> None:
             return None
         return period_min / departures
 
-    def inverse_rl_freq(rl_freq: float, min_raw: float, max_raw: float, scaling: str) -> float:
-        if max_raw <= min_raw:
-            raw_value = min_raw
-        else:
-            normalized = (float(rl_freq) - 1.0) / 11.0
-            normalized = min(1.0, max(0.0, normalized))
-            raw_value = min_raw + normalized * (max_raw - min_raw)
-        if scaling == "log":
-            return float(np.expm1(raw_value))
-        return float(max(raw_value, 0.0))
-
     route_changes = pd.read_csv(OPTIMAL_FREQ_CSV)
     if route_changes.empty:
         raise ValueError("10h_recommendations: optimal_frequencies_best_probe.csv порожній.")
@@ -175,32 +164,18 @@ def run() -> None:
     easyway["direction"] = easyway["direction"].astype(str)
     easyway["index"] = pd.to_numeric(easyway["index"], errors="coerce")
     easyway["times"] = easyway["schedules"].apply(parse_schedules)
-    easyway["n_departures"] = easyway["times"].apply(len)
-    easyway["n_peak_departures"] = easyway["times"].apply(count_peak)
+    easyway["n_stop_departures"] = easyway["times"].apply(len)
+    easyway["n_peak_stop_departures"] = easyway["times"].apply(count_peak)
 
     route_stats_full = (
         easyway.groupby("route_id", as_index=False)
         .agg(
             transport=("transport", "first"),
             route=("route", "first"),
-            total_departures_model=("n_departures", "sum"),
+            total_stop_departures_model=("n_stop_departures", "sum"),
         )
         .reset_index(drop=True)
     )
-    route_stats_full["current_freq_model"] = (route_stats_full["total_departures_model"] / 11.0).clip(lower=0.0)
-    route_stats_full["raw_model_freq"] = route_stats_full["current_freq_model"].astype(float)
-    route_stats_full["scaled_model_freq"] = (
-        np.log1p(route_stats_full["raw_model_freq"])
-        if freq_scaling == "log"
-        else route_stats_full["raw_model_freq"]
-    )
-
-    transport_scale = {}
-    for transport, group in route_stats_full.groupby("transport"):
-        transport_scale[str(transport)] = {
-            "min_raw": float(group["scaled_model_freq"].min()),
-            "max_raw": float(group["scaled_model_freq"].max()),
-        }
 
     first_stop_rows = (
         easyway.sort_values(["route_id", "direction", "index"])
@@ -219,8 +194,8 @@ def run() -> None:
             {
                 "route_id": str(row.route_id),
                 "direction": str(row.direction),
-                "weekday_departures": int(row.n_departures),
-                "peak_departures": int(row.n_peak_departures),
+                "weekday_stop_departures": int(row.n_stop_departures),
+                "peak_stop_departures": int(row.n_peak_stop_departures),
                 "first_time_s": min(row.times) if row.times else None,
                 "last_time_s": max(row.times) if row.times else None,
             }
@@ -258,8 +233,8 @@ def run() -> None:
         direction_stats_df.groupby("route_id", as_index=False)
         .agg(
             directions_count=("direction", "nunique"),
-            weekday_departures_before=("weekday_departures", "sum"),
-            peak_departures_before=("peak_departures", "sum"),
+            weekday_model_stop_departures_before=("weekday_stop_departures", "sum"),
+            peak_model_stop_departures_before=("peak_stop_departures", "sum"),
         )
         .reset_index(drop=True)
     )
@@ -309,21 +284,23 @@ def run() -> None:
         dispatch_key = f"{transport}_{normalize_route(route_label)}"
         dispatch_stats = dispatch_by_key.get(dispatch_key)
         uses_dispatch = dispatch_stats is not None
-        scale = transport_scale.get(transport, {"min_raw": 0.0, "max_raw": 0.0})
-
-        model_before = inverse_rl_freq(float(row.initial_freq), scale["min_raw"], scale["max_raw"], freq_scaling)
-        model_after = inverse_rl_freq(float(row.after_freq), scale["min_raw"], scale["max_raw"], freq_scaling)
-        intensity_ratio = (model_after / model_before) if model_before > 0 else 1.0
+        # RL-шкала не є кількістю рейсів. Для практичного звіту беремо
+        # реальні повні рейси з диспетчерського CSV і масштабуємо їх
+        # відносною зміною нормалізованого RL score. Це сценарна оцінка,
+        # а не буквальний перерахунок розкладу.
+        initial_rl_score = max(float(row.initial_freq), 1e-6)
+        after_rl_score = max(float(row.after_freq), 1e-6)
+        intensity_ratio = after_rl_score / initial_rl_score
 
         weekday_before = float(
             dispatch_stats.get("weekday_trips")
             if dispatch_stats is not None and not pd.isna(dispatch_stats.get("weekday_trips"))
-            else stats.get("weekday_departures_before") or 0.0
+            else stats.get("weekday_model_stop_departures_before") or 0.0
         )
         peak_before = float(
             dispatch_stats.get("peak_trips")
             if dispatch_stats is not None and not pd.isna(dispatch_stats.get("peak_trips"))
-            else stats.get("peak_departures_before") or 0.0
+            else stats.get("peak_model_stop_departures_before") or 0.0
         )
         directions_count = max(
             1.0,
@@ -343,6 +320,21 @@ def run() -> None:
         release_count_before = (
             float(dispatch_stats.get("release_count"))
             if dispatch_stats is not None and not pd.isna(dispatch_stats.get("release_count"))
+            else None
+        )
+        weekday_scheduled_runs_before = (
+            float(dispatch_stats.get("weekday_scheduled_runs"))
+            if dispatch_stats is not None and not pd.isna(dispatch_stats.get("weekday_scheduled_runs"))
+            else None
+        )
+        peak_scheduled_runs_before = (
+            float(dispatch_stats.get("peak_scheduled_runs"))
+            if dispatch_stats is not None and not pd.isna(dispatch_stats.get("peak_scheduled_runs"))
+            else None
+        )
+        partial_runs_before = (
+            float(dispatch_stats.get("partial_runs"))
+            if dispatch_stats is not None and not pd.isna(dispatch_stats.get("partial_runs"))
             else None
         )
 
@@ -382,15 +374,17 @@ def run() -> None:
 
         if float(row.delta) > 0:
             action = "increase"
+            unit_text = "повних рейсів" if uses_dispatch else "модельних easyway-відправлень"
             recommendation_text = (
                 f"Збільшити інтенсивність маршруту {transport} {row.route}: "
-                f"орієнтовно {peak_delta:+.1f} рейсів у пік."
+                f"орієнтовно {peak_delta:+.1f} {unit_text} у пік."
             )
         else:
             action = "decrease"
+            unit_text = "повних рейсів" if uses_dispatch else "модельних easyway-відправлень"
             recommendation_text = (
                 f"Маршрут {transport} {row.route} може бути донором ресурсу: "
-                f"орієнтовно {peak_delta:+.1f} рейсів у пік."
+                f"орієнтовно {peak_delta:+.1f} {unit_text} у пік."
             )
 
         recommendations.append(
@@ -405,17 +399,21 @@ def run() -> None:
                 "rl_after_freq": float(row.after_freq),
                 "rl_delta": float(row.delta),
                 "estimated_intensity_ratio": intensity_ratio,
+                "intensity_conversion_method": "rl_score_ratio",
                 "capacity_per_vehicle": capacity_per_vehicle,
                 "release_count_before": release_count_before,
                 "release_count_after_est": vehicles_after if release_count_before is not None else None,
                 "release_count_delta_est": vehicles_delta if release_count_before is not None else None,
-                "weekday_departures_before": weekday_before,
-                "weekday_departures_after_est": weekday_after,
-                "weekday_departures_delta_est": weekday_delta,
-                "peak_departures_before": peak_before,
-                "peak_departures_after_est": peak_after,
-                "peak_departures_delta_est": peak_delta,
-                "peak_departures_delta_rounded": int(round(peak_delta)),
+                "weekday_scheduled_runs_before": weekday_scheduled_runs_before,
+                "peak_scheduled_runs_before": peak_scheduled_runs_before,
+                "partial_runs_before": partial_runs_before,
+                "weekday_full_trips_before": weekday_before,
+                "weekday_full_trips_after_est": weekday_after,
+                "weekday_full_trips_delta_est": weekday_delta,
+                "peak_full_trips_before": peak_before,
+                "peak_full_trips_after_est": peak_after,
+                "peak_full_trips_delta_est": peak_delta,
+                "peak_full_trips_delta_rounded": int(round(peak_delta)),
                 "peak_capacity_before_places": peak_capacity_before,
                 "peak_capacity_after_est_places": peak_capacity_after,
                 "peak_capacity_delta_est_places": peak_capacity_delta,
@@ -458,13 +456,16 @@ def run() -> None:
             "target_i_peak_after": greedy_results.get("after", {}).get("I_peak_target_mean"),
             "target_i_peak_delta": greedy_results.get("delta", {}).get("I_peak_target_mean"),
             "target_i_peak_delta_pct": greedy_results.get("delta", {}).get("I_peak_target_mean_pct"),
+            "target_worsened_count": greedy_results.get("target_worsened_count", 0),
         },
         "route_recommendations": recommendations,
         "facility_effects": target_summary,
         "interpretation_notes": [
             "rl_freq є нормалізованою відносною шкалою, а не прямою кількістю рейсів.",
-            "Якщо для маршруту є диспетчерський CSV, рейси і випуски беруться з нього; інакше використовується easyway-оцінка.",
-            "Оцінка кількості транспортних одиниць є сценарною: реальний випуск масштабується за коефіцієнтом зміни інтенсивності.",
+            "Рейсами у звіті називаються тільки повні проходи між першою та останньою контрольною точкою з диспетчерського CSV.",
+            "Неповні виїзди/заїзди з депо рахуються окремо як scheduled_runs/partial_runs і не входять до peak_trips.",
+            "Якщо для маршруту немає диспетчерського CSV, у звіті використовується easyway-оцінка і вона явно не трактується як повний рейс.",
+            "Оцінка кількості транспортних одиниць є сценарною: реальний випуск масштабується за відносною зміною RL score.",
         ],
     }
     OUT_JSON.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -486,6 +487,7 @@ def run() -> None:
             f"({payload['summary']['target_i_peak_delta']:+.9f}, "
             f"{payload['summary']['target_i_peak_delta_pct']:+.4f}%)"
         ),
+        f"Target-закладів з погіршенням: {payload['summary']['target_worsened_count']}",
         "",
         "## Рекомендовані зміни маршрутів",
         "",
@@ -500,12 +502,13 @@ def run() -> None:
                 "",
                 item["recommendation"],
                 "",
-                f"- Джерело рейсів: {'диспетчерський CSV' if item['uses_dispatch_schedule'] else 'easyway-оцінка'}",
+                f"- Джерело: {'диспетчерський CSV, тільки повні рейси' if item['uses_dispatch_schedule'] else 'easyway-оцінка, не повні рейси'}",
                 f"- RL-шкала: {item['rl_initial_freq']:.2f} -> {item['rl_after_freq']:.2f} ({item['rl_delta']:+.2f})",
                 (
-                    f"- Рейси у пік: {item['peak_departures_before']:.1f} -> "
-                    f"{item['peak_departures_after_est']:.1f} "
-                    f"({item['peak_departures_delta_est']:+.1f}, округлено {item['peak_departures_delta_rounded']:+d})"
+                    f"- {'Повні рейси у пік' if item['uses_dispatch_schedule'] else 'Модельні easyway-відправлення у пік'}: "
+                    f"{item['peak_full_trips_before']:.1f} -> "
+                    f"{item['peak_full_trips_after_est']:.1f} "
+                    f"({item['peak_full_trips_delta_est']:+.1f}, округлено {item['peak_full_trips_delta_rounded']:+d})"
                 ),
                 (
                     f"- Середній інтервал у пік на напрямок: "
@@ -528,15 +531,16 @@ def run() -> None:
         [
             "## Ефект по закладах",
             "",
-            "| Заклад | Назва | I*_peak до | I*_peak після | Delta | Delta % |",
-            "|---|---:|---:|---:|---:|---:|",
+            "| Заклад | Назва | I*_peak до | I*_peak після | Delta | Delta % | Стан |",
+            "|---|---:|---:|---:|---:|---:|---:|",
         ]
     )
     for item in target_summary:
+        status = "гірше" if bool(item.get("is_worsened", False)) else "не гірше"
         lines.append(
             f"| {item['facility_id']} | {item['name']} | "
             f"{float(item['I_peak_before']):.9f} | {float(item['I_peak_after']):.9f} | "
-            f"{float(item['delta']):+.9f} | {float(item['delta_pct']):+.4f}% |"
+            f"{float(item['delta']):+.9f} | {float(item['delta_pct']):+.4f}% | {status} |"
         )
 
     lines.extend(
@@ -545,7 +549,8 @@ def run() -> None:
             "## Обмеження інтерпретації",
             "",
             "- Це сценарна рекомендація, а не готовий диспетчерський план.",
-            "- Перерахунок рейсів є наближеним, бо RL працює на нормалізованій шкалі частот.",
+            "- RL не генерує новий розклад по хвилинах; він дає сценарну зміну інтенсивності.",
+            "- Перерахунок повних рейсів є наближеним: базові рейси беруться з диспетчерського CSV, а після-сценарій масштабується через RL score.",
             "- Перед практичним застосуванням потрібно перевірити водійські зміни, депо, резерв рухомого складу та пасажиропотік.",
             "",
         ]

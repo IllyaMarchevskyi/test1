@@ -6,9 +6,8 @@
 - route_id
 - transport
 - route
-- direction
-- current_freq (до округлення)
-- rl_initial_freq (після round().clip(1, 12))
+- current_freq (route-level рейси/год або EasyWay fallback)
+- rl_initial_freq (нормалізована RL-інтенсивність)
 """
 
 
@@ -18,14 +17,23 @@ def run() -> None:
 
     import numpy as np
     import pandas as pd
+    from utils.dispatch_frequency import (
+        apply_dispatch_peak_frequency,
+        build_easyway_route_stats,
+        peak_windows_from_config,
+    )
 
     PROCESSED_DIR = Path("./data/processed")
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
     EASYWAY_ROUTES = Path("../gtfs_static/easyway_routes.csv")
     EASYWAY_METRO = Path("../gtfs_static/easyway_metro.csv")
+    DISPATCH_ROUTE_STATS = PROCESSED_DIR / "dispatch_route_stats.csv"
     OUTPUT_CSV = PROCESSED_DIR / "all_routes_weekdays_freq_debug.csv"
     freq_scaling = str(cfg.get("rl", {}).get("freq_scaling", "log")).strip().lower() or "log"
+    peak_cfg = cfg.get("peak_hours", {})
+    peak_windows = peak_windows_from_config(peak_cfg)
+    total_peak_hours = float(peak_cfg.get("total_peak_hours", 4))
 
     required = [EASYWAY_ROUTES]
     missing = [str(path) for path in required if not path.exists()]
@@ -59,15 +67,17 @@ def run() -> None:
     if weekdays.empty:
         raise ValueError("10d_all_routes_freq_debug: у даних не знайдено записів для weekdays.")
 
-    summary = (
-        weekdays.groupby(["route_id", "transport", "route", "direction", "calendar"], as_index=False)
-        .agg(
-            n_stops=("stop_id", "nunique"),
-            total_departures=("n_departures", "sum"),
-        )
-        .reset_index(drop=True)
+    summary = build_easyway_route_stats(
+        weekdays,
+        peak_windows,
+        total_peak_hours,
+        group_by_direction=False,
     )
-    summary["current_freq"] = summary["total_departures"] / 11.0
+    summary = apply_dispatch_peak_frequency(
+        summary,
+        DISPATCH_ROUTE_STATS,
+        total_peak_hours,
+    )
     summary["rl_initial_freq"] = 6.0
     for _, sub_idx in summary.groupby("transport").groups.items():
         current_freq = summary.loc[sub_idx, "current_freq"].astype(float)
@@ -80,20 +90,29 @@ def run() -> None:
             scaled = pd.Series(6.0, index=raw.index)
         summary.loc[sub_idx, "rl_initial_freq"] = scaled.round(2)
     summary = summary.sort_values(
-        ["current_freq", "transport", "route", "direction", "route_id"],
-        ascending=[False, True, True, True, True],
+        ["current_freq", "transport", "route", "route_id"],
+        ascending=[False, True, True, True],
     ).reset_index(drop=True)
 
     summary.to_csv(OUTPUT_CSV, index=False, encoding="utf-8")
 
     print(f"10d_debug: weekdays routes -> {OUTPUT_CSV}")
-    print(f"10d_debug: усього route-direction записів = {len(summary)}")
-    print("10d_debug: current_freq -> rl_initial_freq:")
+    print(f"10d_debug: усього route-level записів = {len(summary)}")
+    print("10d_debug: current_freq_per_hour -> rl_initial_freq:")
     for row in summary.itertuples(index=False):
+        route_peak = getattr(row, "dispatch_peak_trips", None)
+        peak_part = ""
+        if route_peak is not None and not pd.isna(route_peak):
+            peak_part = f", route_peak_trips={float(route_peak):.0f}"
+        elif hasattr(row, "easyway_peak_departures"):
+            peak_part = f", easyway_peak_departures={float(row.easyway_peak_departures):.0f}"
         print(
-            f"  {row.route_id} ({row.transport} {row.route}, {row.direction}) | "
-            f"stops={row.n_stops}, departures={row.total_departures}, "
-            f"current_freq={row.current_freq:.2f} -> rl_initial_freq={float(row.rl_initial_freq):.2f}"
+            f"  {row.route_id} ({row.transport} {row.route}) | "
+            f"stops={row.n_stops}, directions={getattr(row, 'directions_count', 1)}, "
+            f"stop_departures={row.total_departures}, "
+            f"source={getattr(row, 'current_freq_source', 'unknown')}, "
+            f"current_freq_per_hour={row.current_freq:.2f}{peak_part} "
+            f"-> rl_initial_freq={float(row.rl_initial_freq):.2f}"
         )
 
 

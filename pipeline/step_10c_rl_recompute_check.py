@@ -15,6 +15,11 @@ def run() -> None:
 
     import numpy as np
     import pandas as pd
+    from utils.dispatch_frequency import (
+        apply_dispatch_peak_frequency,
+        build_easyway_route_stats,
+        peak_windows_from_config,
+    )
 
     PROCESSED_DIR = Path("./data/processed")
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
@@ -23,6 +28,7 @@ def run() -> None:
     CATCHMENT_BUILDINGS = PROCESSED_DIR / "catchment_buildings_baseline.parquet"
     FACILITY_ENTROPY = PROCESSED_DIR / "facility_entropy_baseline.parquet"
     BUILDING_WEIGHTS = PROCESSED_DIR / "building_weights_baseline.parquet"
+    DISPATCH_ROUTE_STATS = PROCESSED_DIR / "dispatch_route_stats.csv"
     EASYWAY_ROUTES = Path("../gtfs_static/easyway_routes.csv")
     EASYWAY_METRO = Path("../gtfs_static/easyway_metro.csv")
 
@@ -41,6 +47,9 @@ def run() -> None:
         raise FileNotFoundError(f"Відсутні входи для 10c_recompute_check: {missing}")
 
     rl_cfg = cfg.get("rl", {})
+    peak_cfg = cfg.get("peak_hours", {})
+    peak_windows = peak_windows_from_config(peak_cfg)
+    total_peak_hours = float(peak_cfg.get("total_peak_hours", 4))
     freq_scaling = str(rl_cfg.get("freq_scaling", "log")).strip().lower() or "log"
     target_selection = str(rl_cfg.get("target_selection", "bottom_n")).strip().lower()
     target_auto_count = max(1, int(rl_cfg.get("target_auto_count", 10)))
@@ -99,17 +108,18 @@ def run() -> None:
     easyway = easyway[easyway["schedules"] != r"\N"].copy()
     easyway["route_id"] = easyway["route_id"].astype(str)
     easyway["transport"] = easyway["transport"].astype(str)
+    easyway["route"] = easyway["route"].astype(str)
+    easyway["direction"] = easyway["direction"].astype(str)
+    easyway["stop_id"] = easyway["stop_id"].astype(str)
     easyway["times"] = easyway["schedules"].apply(parse_schedules)
     easyway["n_departures"] = easyway["times"].apply(len)
-    route_stats = (
-        easyway.groupby("route_id", as_index=False)
-        .agg(
-            transport=("transport", "first"),
-            total_departures=("n_departures", "sum"),
-        )
-        .reset_index(drop=True)
+    route_stats = build_easyway_route_stats(
+        easyway,
+        peak_windows,
+        total_peak_hours,
+        group_by_direction=False,
     )
-    route_stats["current_freq"] = (route_stats["total_departures"] / 11.0).clip(lower=0.0)
+    route_stats = apply_dispatch_peak_frequency(route_stats, DISPATCH_ROUTE_STATS, total_peak_hours)
     route_stats["rl_initial_freq"] = 6.0
     for _, sub_idx in route_stats.groupby("transport").groups.items():
         current_freq = route_stats.loc[sub_idx, "current_freq"].astype(float)
