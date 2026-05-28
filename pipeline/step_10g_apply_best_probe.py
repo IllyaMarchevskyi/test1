@@ -75,6 +75,7 @@ def run() -> None:
     target_auto_min_i_peak = max(0.0, float(rl_cfg.get("target_auto_min_i_peak", 1e-6)))
     require_osm_mapping = bool(rl_cfg.get("require_osm_mapping", False))
     freq_scaling = str(rl_cfg.get("freq_scaling", "log")).strip().lower() or "log"
+    allow_cross_type_transfers = bool(rl_cfg.get("allow_cross_type_transfers", False))
 
     excluded_transport_types = set(parse_config_list(rl_cfg.get("exclude_transport_types", [])))
     max_steps = max(1, int(rl_cfg.get("max_steps", 50)))
@@ -263,16 +264,24 @@ def run() -> None:
     base_freq_by_idx = np.maximum(initial_freq.astype(np.float32), 1.0)
     route_types = route_stats["transport_type"].to_numpy(dtype=int)
 
-    route_type_to_indices: dict[int, list[int]] = {}
-    for idx, transport_type in enumerate(route_types):
-        route_type_to_indices.setdefault(int(transport_type), []).append(idx)
-    transfer_actions = [
-        (donor_idx, receiver_idx)
-        for same_type_indices in route_type_to_indices.values()
-        for donor_idx in same_type_indices
-        for receiver_idx in same_type_indices
-        if donor_idx != receiver_idx
-    ]
+    if allow_cross_type_transfers:
+        transfer_actions = [
+            (donor_idx, receiver_idx)
+            for donor_idx in range(len(route_stats))
+            for receiver_idx in range(len(route_stats))
+            if donor_idx != receiver_idx
+        ]
+    else:
+        route_type_to_indices: dict[int, list[int]] = {}
+        for idx, transport_type in enumerate(route_types):
+            route_type_to_indices.setdefault(int(transport_type), []).append(idx)
+        transfer_actions = [
+            (donor_idx, receiver_idx)
+            for same_type_indices in route_type_to_indices.values()
+            for donor_idx in same_type_indices
+            for receiver_idx in same_type_indices
+            if donor_idx != receiver_idx
+        ]
     if not transfer_actions:
         raise ValueError("10g_apply_best_probe: action space порожній.")
 
@@ -665,6 +674,7 @@ def run() -> None:
             "max_route_delta": max_route_delta,
             "action_step": action_step,
             "freq_scaling": freq_scaling,
+            "allow_cross_type_transfers": allow_cross_type_transfers,
             "non_target_harm_weight": non_target_harm_weight,
             "non_target_harm_tolerance": non_target_harm_tolerance,
             "target_wait_reward_weight": target_wait_reward_weight,

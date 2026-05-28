@@ -42,6 +42,10 @@ def run() -> None:
 
     rl_cfg = cfg.get("rl", {})
     freq_scaling = str(rl_cfg.get("freq_scaling", "log")).strip().lower() or "log"
+    target_selection = str(rl_cfg.get("target_selection", "bottom_n")).strip().lower()
+    target_auto_count = max(1, int(rl_cfg.get("target_auto_count", 10)))
+    target_auto_max_candidates = max(target_auto_count, int(rl_cfg.get("target_auto_max_candidates", 250)))
+    target_auto_min_i_peak = max(0.0, float(rl_cfg.get("target_auto_min_i_peak", 1e-6)))
     target_facility_id = str(rl_cfg.get("target_facility_id", "")).strip() or None
     target_facility_ids_raw = rl_cfg.get("target_facility_ids", [])
     if isinstance(target_facility_ids_raw, str):
@@ -60,16 +64,6 @@ def run() -> None:
         target_facility_ids = []
     if not target_facility_ids and target_facility_id:
         target_facility_ids = [target_facility_id]
-    if not target_facility_ids:
-        raise ValueError(
-            "10c_recompute_check: у config.toml потрібно задати "
-            "target_facility_id або target_facility_ids."
-        )
-
-    print(
-        "10c_recompute_check: перевіряємо baseline vs recompute для: "
-        f"{', '.join(target_facility_ids)}"
-    )
 
     index_df = pd.read_csv(ACCESSIBILITY_INDEX)
     catchment = pd.read_parquet(CATCHMENT_BUILDINGS)
@@ -128,6 +122,45 @@ def run() -> None:
             scaled = pd.Series(6.0, index=raw.index)
         route_stats.loc[sub_idx, "rl_initial_freq"] = scaled.round(2)
     base_freq_by_route = dict(zip(route_stats["route_id"], route_stats["rl_initial_freq"]))
+
+    if not target_facility_ids:
+        if target_selection not in {"bottom_n", "worst", "auto"}:
+            raise ValueError(
+                "10c_recompute_check: target_selection має бути bottom_n/worst/auto "
+                "або потрібно явно задати target_facility_id(s)."
+            )
+        known_routes = set(base_freq_by_route)
+        selected_ids: list[str] = []
+        candidates = (
+            index_df[index_df["I_peak"] > target_auto_min_i_peak]
+            .sort_values("I_peak", ascending=True)
+            .head(target_auto_max_candidates)
+        )
+        for row in candidates.itertuples(index=False):
+            facility_id = str(row.facility_id)
+            records = catchment[
+                catchment["facility_id"].eq(facility_id)
+                & catchment["peak_mode"].eq("transit")
+                & catchment["peak_route_id"].isin(known_routes)
+            ]
+            if records.empty:
+                continue
+            selected_ids.append(facility_id)
+            if len(selected_ids) >= target_auto_count:
+                break
+        if not selected_ids:
+            raise ValueError("10c_recompute_check: auto target selection не знайшов закладів з transit-маршрутами.")
+        target_facility_ids = selected_ids
+        print(
+            "10c_recompute_check: auto target selection "
+            f"mode={target_selection} count={len(target_facility_ids)} "
+            f"targets={', '.join(target_facility_ids)}"
+        )
+
+    print(
+        "10c_recompute_check: перевіряємо baseline vs recompute для: "
+        f"{', '.join(target_facility_ids)}"
+    )
 
     catchment = catchment.merge(weights, on="building_id", how="left")
     catchment["weight_wb"] = pd.to_numeric(catchment["weight_wb"], errors="coerce").fillna(1.0).clip(lower=1.0)

@@ -95,7 +95,11 @@ def run() -> None:
     if route_changes.empty:
         raise ValueError("10h_recommendations: optimal_frequencies_best_probe.csv порожній.")
     route_changes["route_id"] = route_changes["route_id"].astype(str)
-    require_osm_mapping = bool(cfg.get("rl", {}).get("require_osm_mapping", False))
+    rl_cfg = cfg.get("rl", {})
+    require_osm_mapping = bool(rl_cfg.get("require_osm_mapping", False))
+    recommendation_scenario = str(rl_cfg.get("recommendation_scenario", "baseline")).strip() or "baseline"
+    allow_cross_type_transfers = bool(rl_cfg.get("allow_cross_type_transfers", False))
+    freq_scaling = str(rl_cfg.get("freq_scaling", "log")).strip().lower() or "log"
 
     target_effects = pd.read_csv(TARGET_BEFORE_AFTER_CSV)
     greedy_results = json.loads(GREEDY_RESULTS_JSON.read_text(encoding="utf-8"))
@@ -327,6 +331,12 @@ def run() -> None:
             "target_before_after": str(TARGET_BEFORE_AFTER_CSV),
         },
         "target_facility_ids": greedy_results.get("target_facility_ids", []),
+        "scenario": {
+            "name": recommendation_scenario,
+            "allow_cross_type_transfers": allow_cross_type_transfers,
+            "freq_scaling": freq_scaling,
+            "interpretation": "сценарна оцінка, а не готовий диспетчерський план",
+        },
         "summary": {
             "steps_applied": greedy_results.get("steps_applied"),
             "target_i_peak_before": greedy_results.get("before", {}).get("I_peak_target_mean"),
@@ -346,6 +356,10 @@ def run() -> None:
 
     lines = [
         "# Практичні рекомендації після RL/greedy оптимізації",
+        "",
+        f"Сценарій: {recommendation_scenario}",
+        f"Cross-type transfer: {'увімкнено' if allow_cross_type_transfers else 'вимкнено'}",
+        f"Нормалізація частот: {freq_scaling}",
         "",
         f"Цільові заклади: {', '.join(payload['target_facility_ids'])}",
         f"Кроків greedy: {payload['summary']['steps_applied']}",

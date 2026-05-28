@@ -101,6 +101,8 @@ def run() -> None:
     TARGET_WAIT_REWARD_WEIGHT = float(RL_CFG.get("target_wait_reward_weight", 0.0))
     REQUIRE_OSM_MAPPING = bool(RL_CFG.get("require_osm_mapping", False))
     FREQ_SCALING = str(RL_CFG.get("freq_scaling", "log")).strip().lower() or "log"
+    ALLOW_CROSS_TYPE_TRANSFERS = bool(RL_CFG.get("allow_cross_type_transfers", False))
+    REWARD_SCALE = float(RL_CFG.get("reward_scale", 1.0))
 
     def parse_config_list(value) -> list[str]:
         if isinstance(value, str):
@@ -199,6 +201,9 @@ def run() -> None:
             and float(cached_run.get("non_target_harm_tolerance", -1.0)) == NON_TARGET_HARM_TOLERANCE
             and float(cached_run.get("target_wait_reward_weight", -1.0)) == TARGET_WAIT_REWARD_WEIGHT
             and float(cached_run.get("metric_epsilon", -1.0)) == METRIC_EPS
+            and str(cached_run.get("freq_scaling", "log")) == FREQ_SCALING
+            and bool(cached_run.get("allow_cross_type_transfers", False)) == ALLOW_CROSS_TYPE_TRANSFERS
+            and float(cached_run.get("reward_scale", 1.0)) == REWARD_SCALE
             and cached_excluded == EXCLUDED_TRANSPORT_TYPES
         )
 
@@ -224,6 +229,9 @@ def run() -> None:
         f"non_target_harm_weight={NON_TARGET_HARM_WEIGHT} "
         f"non_target_harm_tolerance={NON_TARGET_HARM_TOLERANCE} "
         f"target_wait_reward_weight={TARGET_WAIT_REWARD_WEIGHT} "
+        f"reward_scale={REWARD_SCALE} "
+        f"freq_scaling={FREQ_SCALING} "
+        f"allow_cross_type_transfers={ALLOW_CROSS_TYPE_TRANSFERS} "
         f"exclude_transport_types={sorted(EXCLUDED_TRANSPORT_TYPES)}"
     )
     index_df = pd.read_csv(ACCESSIBILITY_INDEX)
@@ -491,16 +499,24 @@ def run() -> None:
     route_stops = easyway.groupby("route_id")["stop_id"].apply(set).to_dict()
     route_ids = route_stats["route_id"].tolist()
     route_index = {route_id: idx for idx, route_id in enumerate(route_ids)}
-    route_type_to_indices: dict[int, list[int]] = {}
-    for idx, transport_type in enumerate(route_stats["transport_type"].to_numpy(dtype=int)):
-        route_type_to_indices.setdefault(int(transport_type), []).append(idx)
-    transfer_actions = [
-        (donor_idx, receiver_idx)
-        for same_type_indices in route_type_to_indices.values()
-        for donor_idx in same_type_indices
-        for receiver_idx in same_type_indices
-        if donor_idx != receiver_idx
-    ]
+    if ALLOW_CROSS_TYPE_TRANSFERS:
+        transfer_actions = [
+            (donor_idx, receiver_idx)
+            for donor_idx in range(len(route_stats))
+            for receiver_idx in range(len(route_stats))
+            if donor_idx != receiver_idx
+        ]
+    else:
+        route_type_to_indices: dict[int, list[int]] = {}
+        for idx, transport_type in enumerate(route_stats["transport_type"].to_numpy(dtype=int)):
+            route_type_to_indices.setdefault(int(transport_type), []).append(idx)
+        transfer_actions = [
+            (donor_idx, receiver_idx)
+            for same_type_indices in route_type_to_indices.values()
+            for donor_idx in same_type_indices
+            for receiver_idx in same_type_indices
+            if donor_idx != receiver_idx
+        ]
     if not transfer_actions:
         raise ValueError(
             "10_rl: не вдалося побудувати action space перерозподілу. "
@@ -780,7 +796,7 @@ def run() -> None:
 
             invalid_action = False
 
-            if int(self.route_types[receiver_idx]) != transport_type:
+            if (not ALLOW_CROSS_TYPE_TRANSFERS) and int(self.route_types[receiver_idx]) != transport_type:
                 invalid_action = True
             elif self.current_freq[donor_idx] - ACTION_STEP < 1.0:
                 invalid_action = True
@@ -805,11 +821,12 @@ def run() -> None:
                 new_wait_saving = self._target_wait_saving()
                 wait_reward = new_wait_saving - self.prev_target_wait_saving
                 non_target_harm = self._non_target_harm()
-                reward = -1.0 if invalid_action else (
+                raw_reward = (
                     (new_value - self.prev_value)
                     + (TARGET_WAIT_REWARD_WEIGHT * wait_reward)
                     - (NON_TARGET_HARM_WEIGHT * non_target_harm)
                 )
+                reward = -1.0 if invalid_action else raw_reward * REWARD_SCALE
                 self.prev_value = new_value
                 self.prev_target_wait_saving = new_wait_saving
                 self.current_target_i_peak = new_value
@@ -818,7 +835,7 @@ def run() -> None:
                 self.current_non_target_harm = non_target_harm
             else:
                 new_mean = float(np.mean(list(self.I_peak.values()))) if self.I_peak else 0.0
-                reward = -1.0 if invalid_action else (new_mean - self.prev_mean)
+                reward = -1.0 if invalid_action else (new_mean - self.prev_mean) * REWARD_SCALE
                 self.prev_mean = new_mean
                 self.current_objective_value = new_mean
 
@@ -1282,6 +1299,9 @@ def run() -> None:
             "non_target_harm_weight": NON_TARGET_HARM_WEIGHT,
             "non_target_harm_tolerance": NON_TARGET_HARM_TOLERANCE,
             "target_wait_reward_weight": TARGET_WAIT_REWARD_WEIGHT,
+            "reward_scale": REWARD_SCALE,
+            "freq_scaling": FREQ_SCALING,
+            "allow_cross_type_transfers": ALLOW_CROSS_TYPE_TRANSFERS,
             "metric_epsilon": METRIC_EPS,
             "exclude_transport_types": sorted(EXCLUDED_TRANSPORT_TYPES),
             "action_mode": "redistribution_pair",

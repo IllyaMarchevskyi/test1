@@ -51,12 +51,13 @@ def run() -> None:
     single_target = str(rl_cfg.get("target_facility_id", "")).strip()
     if not target_ids and single_target:
         target_ids = [single_target]
+    target_selection = str(rl_cfg.get("target_selection", "bottom_n")).strip().lower()
+    target_auto_count = max(1, int(rl_cfg.get("target_auto_count", 10)))
+    target_auto_min_actions = max(1, int(rl_cfg.get("target_auto_min_actions", 6)))
+    target_auto_max_candidates = max(target_auto_count, int(rl_cfg.get("target_auto_max_candidates", 250)))
+    target_auto_min_i_peak = max(0.0, float(rl_cfg.get("target_auto_min_i_peak", 1e-6)))
     excluded_transport_types = set(parse_config_list(rl_cfg.get("exclude_transport_types", [])))
-
-    if not target_ids:
-        raise ValueError(
-            "10e_group_debug: у config.toml не задано target_facility_id або target_facility_ids."
-        )
+    allow_cross_type_transfers = bool(rl_cfg.get("allow_cross_type_transfers", False))
 
     index_df = pd.read_csv(ACCESSIBILITY_INDEX)
     index_df["facility_id"] = index_df["facility_id"].astype(str)
@@ -101,6 +102,9 @@ def run() -> None:
     route_to_facilities = transit.groupby("peak_route_id")["facility_id"].apply(lambda s: set(s.astype(str))).to_dict()
 
     def action_pairs_for_routes(route_ids: set[str]) -> int:
+        if allow_cross_type_transfers:
+            count = len(route_ids)
+            return int(count * (count - 1))
         counts: dict[str, int] = {}
         for route_id in route_ids:
             transport = route_transport.get(str(route_id), "unknown")
@@ -121,6 +125,38 @@ def run() -> None:
         for route_id in route_ids:
             affected.update(route_to_facilities.get(str(route_id), set()))
         return affected
+
+    if not target_ids:
+        if target_selection not in {"bottom_n", "worst", "auto"}:
+            raise ValueError(
+                "10e_group_debug: target_selection має бути bottom_n/worst/auto "
+                "або потрібно явно задати target_facility_id(s)."
+            )
+        selected_ids: list[str] = []
+        selected_routes: set[str] = set()
+        candidates = (
+            index_df[index_df["I_peak"] > target_auto_min_i_peak]
+            .sort_values("I_peak", ascending=True)
+            .head(target_auto_max_candidates)
+        )
+        for row in candidates.itertuples(index=False):
+            facility_id = str(row.facility_id)
+            routes = eligible_routes(facility_to_routes.get(facility_id, set()))
+            if not routes:
+                continue
+            selected_ids.append(facility_id)
+            selected_routes.update(routes)
+            if len(selected_ids) >= target_auto_count and action_pairs_for_routes(selected_routes) >= target_auto_min_actions:
+                break
+        if not selected_ids:
+            raise ValueError("10e_group_debug: auto target selection не знайшов закладів з transit-маршрутами.")
+        target_ids = selected_ids
+        print(
+            "10e_group_debug: auto target selection "
+            f"mode={target_selection} count={len(target_ids)} "
+            f"routes={len(selected_routes)} actions={action_pairs_for_routes(selected_routes)} "
+            f"targets={', '.join(target_ids)}"
+        )
 
     target_set = set(target_ids)
     target_routes = set()
@@ -253,6 +289,7 @@ def run() -> None:
             float(target_index["I_peak"].mean()) if not target_index.empty else None
         ),
         "exclude_transport_types": sorted(excluded_transport_types),
+        "allow_cross_type_transfers": allow_cross_type_transfers,
         "local_routes_all_count": len(target_routes_all),
         "local_routes_count": len(target_routes),
         "metro_routes_count": int(sum(1 for route_id in target_routes if route_transport.get(route_id) == "metro")),

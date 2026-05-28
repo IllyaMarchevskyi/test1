@@ -57,8 +57,11 @@ def run() -> None:
     single_target = str(rl_cfg.get("target_facility_id", "")).strip()
     if not target_ids and single_target:
         target_ids = [single_target]
-    if not target_ids:
-        raise ValueError("10f_action_probe: потрібно задати target_facility_id або target_facility_ids.")
+    target_selection = str(rl_cfg.get("target_selection", "bottom_n")).strip().lower()
+    target_auto_count = max(1, int(rl_cfg.get("target_auto_count", 10)))
+    target_auto_min_actions = max(1, int(rl_cfg.get("target_auto_min_actions", 6)))
+    target_auto_max_candidates = max(target_auto_count, int(rl_cfg.get("target_auto_max_candidates", 250)))
+    target_auto_min_i_peak = max(0.0, float(rl_cfg.get("target_auto_min_i_peak", 1e-6)))
 
     excluded_transport_types = set(parse_config_list(rl_cfg.get("exclude_transport_types", [])))
     max_route_delta = max(0.0, float(rl_cfg.get("max_route_delta", 3.0)))
@@ -69,6 +72,7 @@ def run() -> None:
     metric_epsilon = max(0.0, float(rl_cfg.get("metric_epsilon", 1e-8)))
     require_osm_mapping = bool(rl_cfg.get("require_osm_mapping", False))
     freq_scaling = str(rl_cfg.get("freq_scaling", "log")).strip().lower() or "log"
+    allow_cross_type_transfers = bool(rl_cfg.get("allow_cross_type_transfers", False))
 
     route_to_int = {"bus": 0, "trol": 1, "tram": 2, "metro": 3}
 
@@ -159,6 +163,69 @@ def run() -> None:
     easyway["n_departures"] = easyway["times"].apply(len)
 
     route_stats_full = build_rl_initial_freq(easyway)
+    route_transport_by_id = dict(zip(route_stats_full["route_id"].astype(str), route_stats_full["transport"].astype(str)))
+
+    def eligible_facility_routes(facility_id: str) -> set[str]:
+        records = catchment[
+            catchment["facility_id"].eq(str(facility_id))
+            & catchment["peak_mode"].eq("transit")
+            & catchment["peak_route_id"].notna()
+            & catchment["peak_route_id"].ne("nan")
+            & catchment["peak_route_id"].ne("")
+        ]
+        routes = set(records["peak_route_id"].astype(str).unique().tolist())
+        if require_osm_mapping:
+            known_route_ids = set(route_stats_full["route_id"].astype(str).unique())
+            routes = {route_id for route_id in routes if route_id in known_route_ids}
+        if excluded_transport_types:
+            routes = {
+                route_id
+                for route_id in routes
+                if route_transport_by_id.get(route_id, "unknown") not in excluded_transport_types
+            }
+        return routes
+
+    def action_pairs_count(route_ids: set[str]) -> int:
+        if allow_cross_type_transfers:
+            count = len(route_ids)
+            return int(count * (count - 1))
+        counts: dict[str, int] = {}
+        for route_id in route_ids:
+            transport = route_transport_by_id.get(str(route_id), "unknown")
+            counts[transport] = counts.get(transport, 0) + 1
+        return int(sum(count * (count - 1) for count in counts.values()))
+
+    if not target_ids:
+        if target_selection not in {"bottom_n", "worst", "auto"}:
+            raise ValueError(
+                "10f_action_probe: target_selection має бути bottom_n/worst/auto "
+                "або потрібно явно задати target_facility_id(s)."
+            )
+        selected_ids: list[str] = []
+        selected_routes: set[str] = set()
+        candidates = (
+            index_df[index_df["I_peak"] > target_auto_min_i_peak]
+            .sort_values("I_peak", ascending=True)
+            .head(target_auto_max_candidates)
+        )
+        for row in candidates.itertuples(index=False):
+            facility_id = str(row.facility_id)
+            routes = eligible_facility_routes(facility_id)
+            if not routes:
+                continue
+            selected_ids.append(facility_id)
+            selected_routes.update(routes)
+            if len(selected_ids) >= target_auto_count and action_pairs_count(selected_routes) >= target_auto_min_actions:
+                break
+        if not selected_ids:
+            raise ValueError("10f_action_probe: auto target selection не знайшов закладів з transit-маршрутами.")
+        target_ids = selected_ids
+        print(
+            "10f_action_probe: auto target selection "
+            f"mode={target_selection} count={len(target_ids)} "
+            f"routes={len(selected_routes)} actions={action_pairs_count(selected_routes)} "
+            f"targets={', '.join(target_ids)}"
+        )
 
     target_rows = catchment[catchment["facility_id"].isin(target_ids)].copy()
     route_mask = (
@@ -184,16 +251,24 @@ def run() -> None:
     base_freq_by_idx = np.maximum(initial_freq.astype(np.float32), 1.0)
     route_types = route_stats["transport_type"].to_numpy(dtype=int)
 
-    route_type_to_indices: dict[int, list[int]] = {}
-    for idx, transport_type in enumerate(route_types):
-        route_type_to_indices.setdefault(int(transport_type), []).append(idx)
-    transfer_actions = [
-        (donor_idx, receiver_idx)
-        for same_type_indices in route_type_to_indices.values()
-        for donor_idx in same_type_indices
-        for receiver_idx in same_type_indices
-        if donor_idx != receiver_idx
-    ]
+    if allow_cross_type_transfers:
+        transfer_actions = [
+            (donor_idx, receiver_idx)
+            for donor_idx in range(len(route_stats))
+            for receiver_idx in range(len(route_stats))
+            if donor_idx != receiver_idx
+        ]
+    else:
+        route_type_to_indices: dict[int, list[int]] = {}
+        for idx, transport_type in enumerate(route_types):
+            route_type_to_indices.setdefault(int(transport_type), []).append(idx)
+        transfer_actions = [
+            (donor_idx, receiver_idx)
+            for same_type_indices in route_type_to_indices.values()
+            for donor_idx in same_type_indices
+            for receiver_idx in same_type_indices
+            if donor_idx != receiver_idx
+        ]
     if not transfer_actions:
         raise ValueError("10f_action_probe: action space порожній.")
 
