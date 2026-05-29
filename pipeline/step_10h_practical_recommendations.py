@@ -470,6 +470,33 @@ def run() -> None:
     }
     OUT_JSON.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    summary = payload["summary"]
+    target_before = float(summary["target_i_peak_before"] or 0.0)
+    target_after = float(summary["target_i_peak_after"] or 0.0)
+    target_delta = float(summary["target_i_peak_delta"] or 0.0)
+    target_delta_pct = float(summary["target_i_peak_delta_pct"] or 0.0)
+    improved_count = sum(1 for item in target_summary if float(item.get("delta", 0.0)) > 0.0)
+    worsened_count = int(summary.get("target_worsened_count") or 0)
+    unchanged_count = max(0, len(target_summary) - improved_count - worsened_count)
+    if target_delta > 0:
+        conclusion_text = (
+            "У межах заданої target-групи сценарій покращив середній показник "
+            f"пікової доступності I*_peak на {target_delta:+.9f}, або {target_delta_pct:+.4f}%. "
+            f"Покращення отримали {improved_count} із {len(target_summary)} закладів."
+        )
+    elif target_delta < 0:
+        conclusion_text = (
+            "У межах заданої target-групи сценарій не дав покращення: середній "
+            f"I*_peak змінився на {target_delta:+.9f}, або {target_delta_pct:+.4f}%. "
+            "Такий результат треба трактувати як відхилений сценарій."
+        )
+    else:
+        conclusion_text = (
+            "У межах заданої target-групи сценарій не змінив середній I*_peak. "
+            "Це означає, що за поточних обмежень greedy/RL не знайшов корисного "
+            "перерозподілу маршрутної інтенсивності."
+        )
+
     lines = [
         "# Практичні рекомендації після RL/greedy оптимізації",
         "",
@@ -482,12 +509,21 @@ def run() -> None:
         f"Кроків greedy: {payload['summary']['steps_applied']}",
         (
             "Середній I*_peak: "
-            f"{payload['summary']['target_i_peak_before']:.9f} -> "
-            f"{payload['summary']['target_i_peak_after']:.9f} "
-            f"({payload['summary']['target_i_peak_delta']:+.9f}, "
-            f"{payload['summary']['target_i_peak_delta_pct']:+.4f}%)"
+            f"{target_before:.9f} -> "
+            f"{target_after:.9f} "
+            f"({target_delta:+.9f}, "
+            f"{target_delta_pct:+.4f}%)"
         ),
-        f"Target-закладів з погіршенням: {payload['summary']['target_worsened_count']}",
+        f"Target-закладів з погіршенням: {worsened_count}",
+        "",
+        "## Висновок",
+        "",
+        conclusion_text,
+        "",
+        (
+            f"Підсумок по target-закладах: покращено {improved_count}, "
+            f"без суттєвої зміни {unchanged_count}, погіршено {worsened_count}."
+        ),
         "",
         "## Рекомендовані зміни маршрутів",
         "",
@@ -531,16 +567,15 @@ def run() -> None:
         [
             "## Ефект по закладах",
             "",
-            "| Заклад | Назва | I*_peak до | I*_peak після | Delta | Delta % | Стан |",
-            "|---|---:|---:|---:|---:|---:|---:|",
+            "| № | Заклад | Назва | I*_peak до | I*_peak після | Delta | Delta % |",
+            "|---:|---|---|---:|---:|---:|---:|",
         ]
     )
-    for item in target_summary:
-        status = "гірше" if bool(item.get("is_worsened", False)) else "не гірше"
+    for idx, item in enumerate(target_summary, start=1):
         lines.append(
-            f"| {item['facility_id']} | {item['name']} | "
+            f"| {idx} | {item['facility_id']} | {item['name']} | "
             f"{float(item['I_peak_before']):.9f} | {float(item['I_peak_after']):.9f} | "
-            f"{float(item['delta']):+.9f} | {float(item['delta_pct']):+.4f}% | {status} |"
+            f"{float(item['delta']):+.9f} | {float(item['delta_pct']):+.4f}% |"
         )
 
     lines.extend(

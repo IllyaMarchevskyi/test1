@@ -12,12 +12,15 @@ from __future__ import annotations
 def run() -> None:
     from config_loader import cfg
     import json
+    import os
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     from pathlib import Path
 
     import folium
     import numpy as np
     import pandas as pd
     from branca.element import Element
+    from tqdm.auto import tqdm
     from utils.rl_transfer import (
         build_transfer_actions,
         count_transfer_actions_for_routes,
@@ -97,6 +100,7 @@ def run() -> None:
     metric_epsilon = max(0.0, float(rl_cfg.get("metric_epsilon", 1e-8)))
     enforce_target_non_worsening = bool(rl_cfg.get("enforce_target_non_worsening", True))
     target_harm_tolerance = max(0.0, float(rl_cfg.get("target_harm_tolerance", metric_epsilon)))
+    greedy_n_workers = max(1, int(rl_cfg.get("greedy_n_workers", min(os.cpu_count() or 1, 8))))
 
     route_to_int = {"bus": 0, "trol": 1, "tram": 2, "metro": 3}
 
@@ -215,36 +219,53 @@ def run() -> None:
         return count_transfer_actions_for_routes(route_ids, route_transport_by_id, transfer_compatibility)
 
     if not target_ids:
-        if target_selection not in {"bottom_n", "worst", "auto"}:
+        if target_selection not in {"bottom_n", "worst", "auto", "all"}:
             raise ValueError(
-                "10g_apply_best_probe: target_selection має бути bottom_n/worst/auto "
+                "10g_apply_best_probe: target_selection має бути bottom_n/worst/auto/all "
                 "або потрібно явно задати target_facility_id(s)."
             )
         selected_ids: list[str] = []
         selected_routes: set[str] = set()
-        candidates = (
-            index_df[index_df["I_peak"] > target_auto_min_i_peak]
-            .sort_values("I_peak", ascending=True)
-            .head(target_auto_max_candidates)
-        )
-        for row in candidates.itertuples(index=False):
-            facility_id = str(row.facility_id)
-            routes = eligible_facility_routes(facility_id)
-            if not routes:
-                continue
-            selected_ids.append(facility_id)
-            selected_routes.update(routes)
-            if len(selected_ids) >= target_auto_count and action_pairs_count(selected_routes) >= target_auto_min_actions:
-                break
-        if not selected_ids:
-            raise ValueError("10g_apply_best_probe: auto target selection не знайшов закладів з transit-маршрутами.")
-        target_ids = selected_ids
-        print(
-            "10g_apply_best_probe: auto target selection "
-            f"mode={target_selection} count={len(target_ids)} "
-            f"routes={len(selected_routes)} actions={action_pairs_count(selected_routes)} "
-            f"targets={', '.join(target_ids)}"
-        )
+        if target_selection == "all":
+            for row in index_df.itertuples(index=False):
+                facility_id = str(row.facility_id)
+                routes = eligible_facility_routes(facility_id)
+                if not routes:
+                    continue
+                selected_ids.append(facility_id)
+                selected_routes.update(routes)
+            if not selected_ids:
+                raise ValueError("10g_apply_best_probe: 'all' mode не знайшов закладів з transit-маршрутами.")
+            target_ids = selected_ids
+            print(
+                "10g_apply_best_probe: 'all' mode: "
+                f"закладів={len(target_ids)} маршрутів={len(selected_routes)} "
+                f"actions={action_pairs_count(selected_routes)}"
+            )
+        else:
+            candidates = (
+                index_df[index_df["I_peak"] > target_auto_min_i_peak]
+                .sort_values("I_peak", ascending=True)
+                .head(target_auto_max_candidates)
+            )
+            for row in candidates.itertuples(index=False):
+                facility_id = str(row.facility_id)
+                routes = eligible_facility_routes(facility_id)
+                if not routes:
+                    continue
+                selected_ids.append(facility_id)
+                selected_routes.update(routes)
+                if len(selected_ids) >= target_auto_count and action_pairs_count(selected_routes) >= target_auto_min_actions:
+                    break
+            if not selected_ids:
+                raise ValueError("10g_apply_best_probe: auto target selection не знайшов закладів з transit-маршрутами.")
+            target_ids = selected_ids
+            print(
+                "10g_apply_best_probe: auto target selection "
+                f"mode={target_selection} count={len(target_ids)} "
+                f"routes={len(selected_routes)} actions={action_pairs_count(selected_routes)} "
+                f"targets={', '.join(target_ids)}"
+            )
 
     target_rows = catchment[catchment["facility_id"].isin(target_ids)].copy()
     route_mask = (
@@ -493,18 +514,73 @@ def run() -> None:
     current_metrics = objective_value(current_freq, affected_facility_ids)
     baseline_metrics = current_metrics.copy()
     step_rows: list[dict] = []
+    total_targets = len(target_ids)
+    n_actions = len(transfer_actions)
 
-    for step_idx in range(1, max_steps + 1):
-        candidates = [
-            evaluate_action(action_id, donor_idx, receiver_idx, current_freq, affected_facility_ids, current_metrics)
-            for action_id, (donor_idx, receiver_idx) in enumerate(transfer_actions)
-        ]
+    print(
+        f"10g greedy: workers={greedy_n_workers} "
+        f"targets={total_targets} actions={n_actions} max_steps={max_steps}"
+    )
+
+    def _eval_all_actions(
+        freq_snapshot: np.ndarray,
+        affected_snapshot: set[str],
+        metrics_snapshot: dict[str, float],
+    ) -> list[dict]:
+        inner = tqdm(
+            total=n_actions,
+            desc="  оцінка пар",
+            leave=False,
+            unit="пара",
+            position=1,
+        )
+        if greedy_n_workers > 1:
+            results: list[dict] = [{}] * n_actions
+            with ThreadPoolExecutor(max_workers=greedy_n_workers) as executor:
+                future_to_idx = {
+                    executor.submit(
+                        evaluate_action,
+                        action_id, donor_idx, receiver_idx,
+                        freq_snapshot, affected_snapshot, metrics_snapshot,
+                    ): action_id
+                    for action_id, (donor_idx, receiver_idx) in enumerate(transfer_actions)
+                }
+                for future in as_completed(future_to_idx):
+                    result = future.result()
+                    results[result["action_id"]] = result
+                    inner.update(1)
+        else:
+            results = []
+            for action_id, (donor_idx, receiver_idx) in enumerate(transfer_actions):
+                results.append(
+                    evaluate_action(
+                        action_id, donor_idx, receiver_idx,
+                        freq_snapshot, affected_snapshot, metrics_snapshot,
+                    )
+                )
+                inner.update(1)
+        inner.close()
+        return results
+
+    progress = tqdm(
+        range(1, max_steps + 1),
+        desc="10g greedy",
+        unit="крок",
+        total=max_steps,
+        position=0,
+    )
+    for step_idx in progress:
+        candidates = _eval_all_actions(current_freq, affected_facility_ids, current_metrics)
         valid_candidates = [
             row
             for row in candidates
             if row["valid"] and float(row["delta_target_i"]) >= -metric_epsilon
         ]
         if not valid_candidates:
+            progress.set_postfix(
+                статус="немає дій",
+                оброблено=f"{len(affected_facility_ids)}/{total_targets}",
+            )
             break
         best = max(
             valid_candidates,
@@ -515,6 +591,10 @@ def run() -> None:
             ),
         )
         if float(best["objective_delta"]) <= metric_epsilon:
+            progress.set_postfix(
+                статус="збіжність",
+                оброблено=f"{len(affected_facility_ids)}/{total_targets}",
+            )
             break
 
         current_freq = best.pop("_new_freq")
@@ -522,6 +602,12 @@ def run() -> None:
         current_metrics = best.pop("_new_metrics")
         best["step"] = step_idx
         step_rows.append(best)
+        progress.set_postfix(
+            оброблено=f"{len(affected_facility_ids)}/{total_targets}",
+            I_peak=f"{current_metrics['target_i_mean']:.6f}",
+            delta=f"{float(best['objective_delta']):+.2e}",
+        )
+    progress.close()
 
     if step_rows:
         steps_df = pd.DataFrame(step_rows)

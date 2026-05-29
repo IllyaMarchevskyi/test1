@@ -75,7 +75,7 @@ n_estimators = 200        # GradientBoostingRegressor
 # Якщо потрібно тестувати групу закладів, список нижче має пріоритет
 # над одиночним target_facility_id.
 # target_facility_ids = ["H274", "H24", "H340", "H150"]
-target_facility_id = ""
+target_facility_id = "all"
 # Якщо target_facility_id(s) порожні, 10g автоматично вибирає
 # пріоритетну групу з усіх закладів за найнижчим I_peak.
 target_selection = "bottom_n"
@@ -86,14 +86,14 @@ target_auto_min_i_peak = 0.000001
 require_osm_mapping = true
 use_subproc = true
 n_envs = 6
-max_steps = 50
+max_steps = 10
 total_timesteps = 50000
 learning_rate = 0.0003
 n_steps = 50
 log_every = 100
 checkpoint_every = 500
-max_route_delta = 3
-action_step = 0.25
+max_route_delta = 6
+action_step = 1
 freq_scaling = "linear"  # "log" або "linear"
 non_target_harm_weight = 1.0
 # Ігноруємо мікроскопічний числовий шум при штрафі за шкоду нецільовим закладам.
@@ -101,7 +101,7 @@ non_target_harm_tolerance = 0.000000001
 metric_epsilon = 0.00000001
 # Не приймати greedy-крок, якщо він погіршує хоча б один target-заклад
 # більше ніж на target_harm_tolerance.
-enforce_target_non_worsening = true
+enforce_target_non_worsening = false
 target_harm_tolerance = 0.00000001
 # Додатковий навчальний сигнал за зменшення wait для target. 0.0 = вимкнено.
 target_wait_reward_weight = 0.0
@@ -114,14 +114,14 @@ exclude_transport_types = []
 bus = 80
 trol = 100
 tram = 160
-metro = 1000
+metro = 1500
 
 [rl.transfer_compatibility]
 # Матриця сумісності перерозподілу ресурсу: donor -> allowed receivers.
 # Для тролейбусного ресурсу дозволяємо також автобусний receiver:
 # це означає сценарій підсилення коридору автобусом, а не появу
 # тролейбусної лінії там, де немає контактної мережі.
-bus = ["bus", "trol"]
+bus = ["bus"]
 trol = ["trol", "bus"]
 tram = ["tram"]
 metro = ["metro"]
