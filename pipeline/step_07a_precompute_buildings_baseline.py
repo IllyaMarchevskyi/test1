@@ -170,7 +170,7 @@ def run() -> None:
     rows_long = []
     rows_exit = []
     progress = tqdm(total=len(stop_centers), desc="Baseline 07a Dijkstra")
-    with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as executor:
+    with ThreadPoolExecutor(max_workers=max(1, int(cfg.get("rl", {}).get("n_envs", os.cpu_count() or 4)))) as executor:
         futures = [executor.submit(run_dijkstra, stop_id, node_id) for stop_id, node_id in stop_centers]
         for future in as_completed(futures):
             part_short, part_long, part_exit = future.result()

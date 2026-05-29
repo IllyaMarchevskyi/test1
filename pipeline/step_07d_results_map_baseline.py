@@ -178,7 +178,7 @@ def run() -> None:
         "grp_transit_short": GRP_TRANSIT_SHORT,
         "grp_walk_long": GRP_WALK_LONG,
         "grp_transit_long": GRP_TRANSIT_LONG,
-        "parallel_workers": min(8, os.cpu_count() or 1),
+        "parallel_workers": max(1, int(cfg.get("rl", {}).get("n_envs", min(8, os.cpu_count() or 1)))),
     }
     try:
         payload = export_catchment_map_data(**export_kwargs)

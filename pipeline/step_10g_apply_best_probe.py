@@ -100,7 +100,7 @@ def run() -> None:
     metric_epsilon = max(0.0, float(rl_cfg.get("metric_epsilon", 1e-8)))
     enforce_target_non_worsening = bool(rl_cfg.get("enforce_target_non_worsening", True))
     target_harm_tolerance = max(0.0, float(rl_cfg.get("target_harm_tolerance", metric_epsilon)))
-    greedy_n_workers = max(1, int(rl_cfg.get("greedy_n_workers", min(os.cpu_count() or 1, 8))))
+    greedy_n_workers = max(1, int(rl_cfg.get("n_envs", min(os.cpu_count() or 1, 8))))
 
     route_to_int = {"bus": 0, "trol": 1, "tram": 2, "metro": 3}
 
