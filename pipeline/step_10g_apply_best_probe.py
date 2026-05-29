@@ -433,6 +433,8 @@ def run() -> None:
         current_freq: np.ndarray,
         affected_facility_ids: set[str],
         current_metrics: dict[str, float],
+        i_peak_cache: dict[str, float],
+        current_target_mean: float,
     ) -> dict:
         donor_after = float(current_freq[donor_idx] - action_step)
         receiver_after = float(current_freq[receiver_idx] + action_step)
@@ -446,32 +448,10 @@ def run() -> None:
         elif receiver_after > min(12.0, float(initial_freq[receiver_idx]) + max_route_delta):
             invalid_reason = "receiver_above_delta_limit"
 
-        new_freq = current_freq.copy()
-        action_affected = facilities_by_route.get(donor_idx, set()) | facilities_by_route.get(receiver_idx, set())
-        new_affected = set(affected_facility_ids) | action_affected
-        target_worsened_count = 0
-        target_min_delta = 0.0
-        if not invalid_reason:
-            new_freq[donor_idx] = donor_after
-            new_freq[receiver_idx] = receiver_after
-            new_target_values = target_values(new_freq)
-            target_worsened_count, target_min_delta = target_worsening(new_target_values)
-            if enforce_target_non_worsening and target_worsened_count > 0:
-                invalid_reason = "target_worsening"
-                new_freq = current_freq.copy()
-                new_metrics = current_metrics.copy()
-            else:
-                new_metrics = objective_value(new_freq, new_affected)
-        else:
-            new_metrics = current_metrics.copy()
-            target_worsened_count, target_min_delta = target_worsening(target_values(new_freq))
-
         donor = route_stats.iloc[donor_idx]
         receiver = route_stats.iloc[receiver_idx]
-        return {
+        _base = {
             "action_id": int(action_id),
-            "valid": not bool(invalid_reason),
-            "invalid_reason": invalid_reason,
             "donor_idx": int(donor_idx),
             "receiver_idx": int(receiver_idx),
             "donor_route_id": str(donor.route_id),
@@ -486,20 +466,135 @@ def run() -> None:
             "receiver_initial_freq": float(initial_freq[receiver_idx]),
             "receiver_before_freq": float(current_freq[receiver_idx]),
             "receiver_after_freq": receiver_after,
+        }
+
+        if invalid_reason:
+            return {
+                **_base,
+                "valid": False,
+                "invalid_reason": invalid_reason,
+                "target_i_before": float(current_metrics["target_i_mean"]),
+                "target_i_after": float(current_metrics["target_i_mean"]),
+                "delta_target_i": 0.0,
+                "target_wait_saving_before": float(current_metrics["target_wait_saving_min"]),
+                "target_wait_saving_after": float(current_metrics["target_wait_saving_min"]),
+                "target_wait_saving_delta": 0.0,
+                "non_target_harm_before": float(current_metrics["non_target_harm"]),
+                "non_target_harm_after": float(current_metrics["non_target_harm"]),
+                "non_target_harm_delta": 0.0,
+                "objective_before": float(current_metrics["objective"]),
+                "objective_after": float(current_metrics["objective"]),
+                "objective_delta": 0.0,
+                "target_worsened_count": 0,
+                "target_min_delta_vs_baseline": 0.0,
+                "affected_count": len(affected_facility_ids),
+                "non_target_affected_count": len(affected_facility_ids - target_set),
+                "_new_freq": current_freq,
+                "_new_affected": affected_facility_ids,
+                "_new_metrics": current_metrics,
+                "_new_i_snapshot": {},
+                "_new_target_mean": current_target_mean,
+            }
+
+        new_freq = current_freq.copy()
+        new_freq[donor_idx] = donor_after
+        new_freq[receiver_idx] = receiver_after
+
+        action_affected = facilities_by_route.get(donor_idx, set()) | facilities_by_route.get(receiver_idx, set())
+        new_affected = set(affected_facility_ids) | action_affected
+        affected_targets_here = action_affected & target_set
+
+        # Інкрементальне оновлення: recalc_i тільки для зачеплених закладів.
+        # Решта target_ids не змінюються — їх значення беремо з кешу.
+        delta_sum = 0.0
+        new_i_snapshot: dict[str, float] = {}
+        for fid in affected_targets_here:
+            old_i = i_peak_cache.get(fid, 0.0)
+            new_i = recalc_i(fid, new_freq)
+            new_i_snapshot[fid] = new_i
+            delta_sum += new_i - old_i
+
+        n_targets_total = len(target_ids) or 1
+        new_target_mean = current_target_mean + delta_sum / n_targets_total
+
+        # Перевірка target_worsening тільки для зачеплених закладів
+        target_worsened_count = 0
+        target_min_delta = 0.0
+        if affected_targets_here:
+            deltas = [
+                new_i_snapshot[fid] - initial_i_peak.get(fid, 0.0)
+                for fid in affected_targets_here
+            ]
+            target_min_delta = min(deltas)
+            target_worsened_count = sum(1 for d in deltas if d < -target_harm_tolerance)
+            if enforce_target_non_worsening and target_worsened_count > 0:
+                return {
+                    **_base,
+                    "valid": False,
+                    "invalid_reason": "target_worsening",
+                    "target_i_before": float(current_metrics["target_i_mean"]),
+                    "target_i_after": new_target_mean,
+                    "delta_target_i": new_target_mean - float(current_metrics["target_i_mean"]),
+                    "target_wait_saving_before": float(current_metrics["target_wait_saving_min"]),
+                    "target_wait_saving_after": float(current_metrics["target_wait_saving_min"]),
+                    "target_wait_saving_delta": 0.0,
+                    "non_target_harm_before": float(current_metrics["non_target_harm"]),
+                    "non_target_harm_after": float(current_metrics["non_target_harm"]),
+                    "non_target_harm_delta": 0.0,
+                    "objective_before": float(current_metrics["objective"]),
+                    "objective_after": float(current_metrics["objective"]),
+                    "objective_delta": 0.0,
+                    "target_worsened_count": int(target_worsened_count),
+                    "target_min_delta_vs_baseline": float(target_min_delta),
+                    "affected_count": len(new_affected),
+                    "non_target_affected_count": len(new_affected - target_set),
+                    "_new_freq": current_freq,
+                    "_new_affected": affected_facility_ids,
+                    "_new_metrics": current_metrics,
+                    "_new_i_snapshot": {},
+                    "_new_target_mean": current_target_mean,
+                }
+
+        # Non-target harm: recalc тільки нещодавно зачеплених нецільових закладів
+        non_target_ids = action_affected - target_set
+        if non_target_ids and non_target_harm_weight > 0:
+            before_nt = float(np.mean([initial_i_peak.get(fid, 0.0) for fid in non_target_ids]))
+            after_nt = float(np.mean([recalc_i(fid, new_freq) for fid in non_target_ids]))
+            harm = max(0.0, before_nt - after_nt - non_target_harm_tolerance)
+        else:
+            harm = 0.0
+
+        # Wait saving: пропускаємо якщо вага == 0
+        wait_saving = (
+            target_wait_saving(new_freq) if target_wait_reward_weight > 0
+            else float(current_metrics["target_wait_saving_min"])
+        )
+
+        objective = new_target_mean + target_wait_reward_weight * wait_saving - non_target_harm_weight * harm
+        objective_delta = objective - float(current_metrics["objective"])
+        new_metrics = {
+            "target_i_mean": new_target_mean,
+            "target_wait_saving_min": wait_saving,
+            "non_target_harm": harm,
+            "objective": objective,
+        }
+
+        return {
+            **_base,
+            "valid": True,
+            "invalid_reason": "",
             "target_i_before": float(current_metrics["target_i_mean"]),
-            "target_i_after": float(new_metrics["target_i_mean"]),
-            "delta_target_i": float(new_metrics["target_i_mean"] - current_metrics["target_i_mean"]),
+            "target_i_after": new_target_mean,
+            "delta_target_i": new_target_mean - float(current_metrics["target_i_mean"]),
             "target_wait_saving_before": float(current_metrics["target_wait_saving_min"]),
-            "target_wait_saving_after": float(new_metrics["target_wait_saving_min"]),
-            "target_wait_saving_delta": float(
-                new_metrics["target_wait_saving_min"] - current_metrics["target_wait_saving_min"]
-            ),
+            "target_wait_saving_after": wait_saving,
+            "target_wait_saving_delta": wait_saving - float(current_metrics["target_wait_saving_min"]),
             "non_target_harm_before": float(current_metrics["non_target_harm"]),
-            "non_target_harm_after": float(new_metrics["non_target_harm"]),
-            "non_target_harm_delta": float(new_metrics["non_target_harm"] - current_metrics["non_target_harm"]),
+            "non_target_harm_after": harm,
+            "non_target_harm_delta": harm - float(current_metrics["non_target_harm"]),
             "objective_before": float(current_metrics["objective"]),
-            "objective_after": float(new_metrics["objective"]),
-            "objective_delta": float(new_metrics["objective"] - current_metrics["objective"]),
+            "objective_after": objective,
+            "objective_delta": objective_delta,
             "target_worsened_count": int(target_worsened_count),
             "target_min_delta_vs_baseline": float(target_min_delta),
             "affected_count": len(new_affected),
@@ -507,12 +602,12 @@ def run() -> None:
             "_new_freq": new_freq,
             "_new_affected": new_affected,
             "_new_metrics": new_metrics,
+            "_new_i_snapshot": new_i_snapshot,
+            "_new_target_mean": new_target_mean,
         }
 
     current_freq = initial_freq.copy()
     affected_facility_ids: set[str] = set()
-    current_metrics = objective_value(current_freq, affected_facility_ids)
-    baseline_metrics = current_metrics.copy()
     step_rows: list[dict] = []
     total_targets = len(target_ids)
     n_actions = len(transfer_actions)
@@ -521,11 +616,23 @@ def run() -> None:
         f"10g greedy: workers={greedy_n_workers} "
         f"targets={total_targets} actions={n_actions} max_steps={max_steps}"
     )
+    print("10g: pre-computing I_peak cache...")
+    i_peak_cache: dict[str, float] = {fid: recalc_i(fid, current_freq) for fid in target_ids}
+    current_target_mean = float(np.mean(list(i_peak_cache.values()))) if i_peak_cache else 0.0
+    current_metrics = {
+        "target_i_mean": current_target_mean,
+        "target_wait_saving_min": target_wait_saving(current_freq) if target_wait_reward_weight > 0 else 0.0,
+        "non_target_harm": 0.0,
+        "objective": current_target_mean,
+    }
+    baseline_metrics = current_metrics.copy()
 
     def _eval_all_actions(
         freq_snapshot: np.ndarray,
         affected_snapshot: set[str],
         metrics_snapshot: dict[str, float],
+        cache_snapshot: dict[str, float],
+        target_mean_snapshot: float,
     ) -> list[dict]:
         inner = tqdm(
             total=n_actions,
@@ -542,6 +649,7 @@ def run() -> None:
                         evaluate_action,
                         action_id, donor_idx, receiver_idx,
                         freq_snapshot, affected_snapshot, metrics_snapshot,
+                        cache_snapshot, target_mean_snapshot,
                     ): action_id
                     for action_id, (donor_idx, receiver_idx) in enumerate(transfer_actions)
                 }
@@ -556,6 +664,7 @@ def run() -> None:
                     evaluate_action(
                         action_id, donor_idx, receiver_idx,
                         freq_snapshot, affected_snapshot, metrics_snapshot,
+                        cache_snapshot, target_mean_snapshot,
                     )
                 )
                 inner.update(1)
@@ -570,7 +679,7 @@ def run() -> None:
         position=0,
     )
     for step_idx in progress:
-        candidates = _eval_all_actions(current_freq, affected_facility_ids, current_metrics)
+        candidates = _eval_all_actions(current_freq, affected_facility_ids, current_metrics, i_peak_cache, current_target_mean)
         valid_candidates = [
             row
             for row in candidates
@@ -600,6 +709,9 @@ def run() -> None:
         current_freq = best.pop("_new_freq")
         affected_facility_ids = best.pop("_new_affected")
         current_metrics = best.pop("_new_metrics")
+        for fid, new_i in best.pop("_new_i_snapshot").items():
+            i_peak_cache[fid] = new_i
+        current_target_mean = best.pop("_new_target_mean")
         best["step"] = step_idx
         step_rows.append(best)
         progress.set_postfix(
