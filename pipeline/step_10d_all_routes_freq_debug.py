@@ -28,6 +28,7 @@ def run() -> None:
 
     EASYWAY_ROUTES = Path("../gtfs_static/easyway_routes.csv")
     EASYWAY_METRO = Path("../gtfs_static/easyway_metro.csv")
+    EASYWAY_TRAM = Path("../gtfs_static/easyway_tram_data.csv")
     DISPATCH_ROUTE_STATS = PROCESSED_DIR / "dispatch_route_stats.csv"
     OUTPUT_CSV = PROCESSED_DIR / "all_routes_weekdays_freq_debug.csv"
     freq_scaling = str(cfg.get("rl", {}).get("freq_scaling", "log")).strip().lower() or "log"
@@ -53,6 +54,8 @@ def run() -> None:
     parts = [pd.read_csv(EASYWAY_ROUTES)]
     if EASYWAY_METRO.exists():
         parts.append(pd.read_csv(EASYWAY_METRO))
+    if EASYWAY_TRAM.exists():
+        parts.append(pd.read_csv(EASYWAY_TRAM))
     df = pd.concat(parts, ignore_index=True)
 
     df["route_id"] = df["route_id"].astype(str)

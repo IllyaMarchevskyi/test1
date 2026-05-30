@@ -97,6 +97,9 @@ def run() -> None:
     CACHE_STOP_FAC_EXIT = f"{PROCESSED_DIR}/stop_to_fac_exit_baseline.parquet"
     OSM_EASYWAY_PATH = "../gtfs_static/osm_easyway_data.csv"
     OSM_EASYWAY_METRO_PATH = "../gtfs_static/osm_easyway_metro_data.csv"
+    EASYWAY_TRAM_PATH = "../gtfs_static/easyway_tram_data.csv"
+    OSM_TRAM_STOPS_PATH = "../gtfs_static/osm_tram_stops.csv"
+    OSM_TRAM_FAST_STOPS_PATH = "../gtfs_static/osm_tram_fast_stops.csv"
     OSM_STOPS_CSV_PATH = "../gtfs_static/osm_stops.csv"
     GMETRO_CSV_PATH = "../gtfs_static/gmetro.csv"
 
@@ -134,6 +137,11 @@ def run() -> None:
     freshness_inputs = [OSM_EASYWAY_PATH, OSM_STOPS_CSV_PATH]
     if os.path.exists(OSM_EASYWAY_METRO_PATH) and os.path.exists(GMETRO_CSV_PATH):
         freshness_inputs.extend([OSM_EASYWAY_METRO_PATH, GMETRO_CSV_PATH])
+    if os.path.exists(EASYWAY_TRAM_PATH):
+        freshness_inputs.append(EASYWAY_TRAM_PATH)
+        for p in [OSM_TRAM_STOPS_PATH, OSM_TRAM_FAST_STOPS_PATH]:
+            if os.path.exists(p):
+                freshness_inputs.append(p)
     inputs_mtime = max(os.path.getmtime(path) for path in freshness_inputs)
     caches_fresh = all(os.path.getmtime(path) >= inputs_mtime for path in cache_paths if os.path.exists(path))
     if all_cached and caches_fresh:
@@ -183,6 +191,27 @@ def run() -> None:
         stop_frames.append(gmetro)
     else:
         print("Metro-файли не знайдено, 07a_base рахуємо без метро.")
+
+    if os.path.exists(EASYWAY_TRAM_PATH):
+        print(f"Завантажуємо трамвайний місток: {EASYWAY_TRAM_PATH}")
+        tram_bridge = pd.read_csv(EASYWAY_TRAM_PATH, usecols=["osm_id", "stop_id", "transport"]).dropna(subset=["osm_id", "stop_id"])
+        tram_bridge["osm_id"] = tram_bridge["osm_id"].astype(str)
+        tram_bridge["stop_id"] = tram_bridge["stop_id"].astype(str)
+        for transport_val, stops_path in [("tram", OSM_TRAM_STOPS_PATH), ("light-rail", OSM_TRAM_FAST_STOPS_PATH)]:
+            if not os.path.exists(stops_path):
+                continue
+            bridge_part = tram_bridge[tram_bridge["transport"] == transport_val][["osm_id", "stop_id"]].drop_duplicates()
+            stops_raw = pd.read_csv(stops_path).dropna(subset=["geometry"]).copy()
+            stops_raw["geometry"] = stops_raw["geometry"].map(wkt.loads)
+            stops_raw["osm_id"] = stops_raw.index.astype(str)
+            stops_gdf = gpd.GeoDataFrame(stops_raw, geometry="geometry", crs="EPSG:4326")
+            stops_gdf = stops_gdf[stops_gdf.geometry.geom_type == "Point"].copy()
+            stops_gdf = stops_gdf.merge(bridge_part, on="osm_id", how="inner")
+            stops_gdf = stops_gdf.drop_duplicates(subset=["stop_id"]).reset_index(drop=True)
+            stop_frames.append(stops_gdf)
+            print(f"  {transport_val}: {len(stops_gdf):,} зупинок")
+    else:
+        print("easyway_tram_data.csv не знайдено, 07a_base рахуємо без трамваїв.")
 
     osm_stops = pd.concat(stop_frames, ignore_index=True)
     osm_stops = gpd.GeoDataFrame(osm_stops, geometry="geometry", crs="EPSG:4326")

@@ -23,6 +23,7 @@ def run() -> None:
 
     EASYWAY_PATH = "../gtfs_static/easyway_routes.csv"
     EASYWAY_METRO_PATH = "../gtfs_static/easyway_metro.csv"
+    EASYWAY_TRAM_PATH = "../gtfs_static/easyway_tram_data.csv"
     OSM_EASYWAY_PATH = "../gtfs_static/osm_easyway_data.csv"
     OSM_EASYWAY_METRO_PATH = "../gtfs_static/osm_easyway_metro_data.csv"
     PROCESSED_DIR = "./data/processed"
@@ -149,12 +150,20 @@ def run() -> None:
         easyway = pd.concat([easyway, easyway_metro], ignore_index=True)
     else:
         print("Baseline 07b: easyway_metro.csv не знайдено, рахуємо без метро.")
+    if os.path.exists(EASYWAY_TRAM_PATH):
+        print(f"Baseline 07b: додаємо трамваї з {EASYWAY_TRAM_PATH}")
+        easyway_tram = pd.read_csv(EASYWAY_TRAM_PATH)
+        easyway = pd.concat([easyway, easyway_tram], ignore_index=True)
+    else:
+        print("Baseline 07b: easyway_tram_data.csv не знайдено, рахуємо без трамваїв.")
     if REQUIRE_OSM_MAPPING:
         osm_parts = []
         if os.path.exists(OSM_EASYWAY_PATH):
             osm_parts.append(pd.read_csv(OSM_EASYWAY_PATH, usecols=["route_id"]))
         if os.path.exists(OSM_EASYWAY_METRO_PATH):
             osm_parts.append(pd.read_csv(OSM_EASYWAY_METRO_PATH, usecols=["route_id"]))
+        if os.path.exists(EASYWAY_TRAM_PATH):
+            osm_parts.append(pd.read_csv(EASYWAY_TRAM_PATH, usecols=["route_id"]))
         if not osm_parts:
             raise FileNotFoundError(
                 "Baseline 07b: require_osm_mapping=true, але osm_easyway_data.csv не знайдено."
@@ -173,6 +182,8 @@ def run() -> None:
     inputs_for_cache = [EASYWAY_PATH]
     if os.path.exists(EASYWAY_METRO_PATH):
         inputs_for_cache.append(EASYWAY_METRO_PATH)
+    if os.path.exists(EASYWAY_TRAM_PATH):
+        inputs_for_cache.append(EASYWAY_TRAM_PATH)
     if REQUIRE_OSM_MAPPING:
         if os.path.exists(OSM_EASYWAY_PATH):
             inputs_for_cache.append(OSM_EASYWAY_PATH)

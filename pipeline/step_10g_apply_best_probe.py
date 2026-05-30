@@ -48,6 +48,7 @@ def run() -> None:
     RL_RESULTS_JSON = PROCESSED_DIR / "rl_results.json"
     EASYWAY_ROUTES = Path("../gtfs_static/easyway_routes.csv")
     EASYWAY_METRO = Path("../gtfs_static/easyway_metro.csv")
+    EASYWAY_TRAM = Path("../gtfs_static/easyway_tram_data.csv")
     OSM_EASYWAY_DATA = Path("../gtfs_static/osm_easyway_data.csv")
     OSM_EASYWAY_METRO_DATA = Path("../gtfs_static/osm_easyway_metro_data.csv")
 
@@ -102,7 +103,7 @@ def run() -> None:
     target_harm_tolerance = max(0.0, float(rl_cfg.get("target_harm_tolerance", metric_epsilon)))
     greedy_n_workers = max(1, int(rl_cfg.get("n_envs", min(os.cpu_count() or 1, 8))))
 
-    route_to_int = {"bus": 0, "trol": 1, "tram": 2, "metro": 3}
+    route_to_int = {"bus": 0, "trol": 1, "tram": 2, "metro": 3, "light-rail": 4}
 
     def parse_schedules(value: str) -> list[int]:
         times: list[int] = []
@@ -165,6 +166,8 @@ def run() -> None:
     easyway_parts = [pd.read_csv(EASYWAY_ROUTES)]
     if EASYWAY_METRO.exists():
         easyway_parts.append(pd.read_csv(EASYWAY_METRO))
+    if EASYWAY_TRAM.exists():
+        easyway_parts.append(pd.read_csv(EASYWAY_TRAM))
     easyway = pd.concat(easyway_parts, ignore_index=True)
     allowed_route_ids: set[str] | None = None
     if require_osm_mapping:
@@ -173,6 +176,8 @@ def run() -> None:
             osm_parts.append(pd.read_csv(OSM_EASYWAY_DATA, usecols=["route_id"]))
         if OSM_EASYWAY_METRO_DATA.exists():
             osm_parts.append(pd.read_csv(OSM_EASYWAY_METRO_DATA, usecols=["route_id"]))
+        if EASYWAY_TRAM.exists():
+            osm_parts.append(pd.read_csv(EASYWAY_TRAM, usecols=["route_id"]))
         if not osm_parts:
             raise FileNotFoundError(
                 "10g_apply_best_probe: require_osm_mapping=true, але osm_easyway_data.csv не знайдено."

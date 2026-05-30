@@ -164,12 +164,15 @@ allow_cross_type_transfers = false
 bus   = 80
 trol  = 100
 tram  = 160
+light_tram = 350
 metro = 1500
 
 [rl.transfer_compatibility]
 # Які типи ТЗ можуть отримати ресурс від донора.
 # trol → bus: автобус підсилює коридор там, де немає контактної мережі.
-bus   = ["bus"]
-trol  = ["trol", "bus"]
-tram  = ["tram"]
-metro = ["metro"]
+# tram ↔ light_tram: спільна трамвайна мережа, можливий перерозподіл рухомого складу.
+bus        = ["bus"]
+trol       = ["trol", "bus"]
+tram       = ["tram", "light_tram"]
+light_tram = ["light_tram", "tram"]
+metro      = ["metro"]

@@ -30,6 +30,7 @@ def run() -> None:
     DISPATCH_ROUTE_STATS = PROCESSED_DIR / "dispatch_route_stats.csv"
     EASYWAY_ROUTES = Path("../gtfs_static/easyway_routes.csv")
     EASYWAY_METRO = Path("../gtfs_static/easyway_metro.csv")
+    EASYWAY_TRAM = Path("../gtfs_static/easyway_tram_data.csv")
     OSM_EASYWAY_DATA = Path("../gtfs_static/osm_easyway_data.csv")
     OSM_EASYWAY_METRO_DATA = Path("../gtfs_static/osm_easyway_metro_data.csv")
 
@@ -137,6 +138,8 @@ def run() -> None:
     easyway_parts = [pd.read_csv(EASYWAY_ROUTES)]
     if EASYWAY_METRO.exists():
         easyway_parts.append(pd.read_csv(EASYWAY_METRO))
+    if EASYWAY_TRAM.exists():
+        easyway_parts.append(pd.read_csv(EASYWAY_TRAM))
     easyway = pd.concat(easyway_parts, ignore_index=True)
     if require_osm_mapping:
         osm_parts = []
@@ -144,6 +147,8 @@ def run() -> None:
             osm_parts.append(pd.read_csv(OSM_EASYWAY_DATA, usecols=["route_id"]))
         if OSM_EASYWAY_METRO_DATA.exists():
             osm_parts.append(pd.read_csv(OSM_EASYWAY_METRO_DATA, usecols=["route_id"]))
+        if EASYWAY_TRAM.exists():
+            osm_parts.append(pd.read_csv(EASYWAY_TRAM, usecols=["route_id"]))
         if not osm_parts:
             raise FileNotFoundError(
                 "10h_recommendations: require_osm_mapping=true, але osm_easyway_data.csv не знайдено."

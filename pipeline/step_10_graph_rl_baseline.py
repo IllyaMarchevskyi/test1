@@ -71,6 +71,7 @@ def run() -> None:
     DISPATCH_ROUTE_STATS = PROCESSED_DIR / "dispatch_route_stats.csv"
     EASYWAY_ROUTES = Path("../gtfs_static/easyway_routes.csv")
     EASYWAY_METRO = Path("../gtfs_static/easyway_metro.csv")
+    EASYWAY_TRAM = Path("../gtfs_static/easyway_tram_data.csv")
     SCORES_PATH = Path(cfg["paths"]["scores"])
     OSM_BRIDGE_PATH = Path("../gtfs_static/osm_easyway_data.csv")
     OSM_STOPS_PATH = Path("../gtfs_static/osm_stops.csv")
@@ -253,6 +254,8 @@ def run() -> None:
     easyway_parts = [pd.read_csv(EASYWAY_ROUTES)]
     if EASYWAY_METRO.exists():
         easyway_parts.append(pd.read_csv(EASYWAY_METRO))
+    if EASYWAY_TRAM.exists():
+        easyway_parts.append(pd.read_csv(EASYWAY_TRAM))
     easyway = pd.concat(easyway_parts, ignore_index=True)
     if REQUIRE_OSM_MAPPING:
         osm_parts = []
@@ -260,6 +263,8 @@ def run() -> None:
             osm_parts.append(pd.read_csv(OSM_BRIDGE_PATH, usecols=["route_id"]))
         if OSM_BRIDGE_METRO_PATH.exists():
             osm_parts.append(pd.read_csv(OSM_BRIDGE_METRO_PATH, usecols=["route_id"]))
+        if EASYWAY_TRAM.exists():
+            osm_parts.append(pd.read_csv(EASYWAY_TRAM, usecols=["route_id"]))
         if not osm_parts:
             raise FileNotFoundError(
                 "10_rl: require_osm_mapping=true, але osm_easyway_data.csv не знайдено."
@@ -291,7 +296,7 @@ def run() -> None:
     weights["weight_wb"] = pd.to_numeric(weights["weight_wb"], errors="coerce").fillna(1.0).clip(lower=1.0)
 
     total_city_weight = float(weights["weight_wb"].sum())
-    route_to_int = {"bus": 0, "trol": 1, "tram": 2, "metro": 3}
+    route_to_int = {"bus": 0, "trol": 1, "tram": 2, "metro": 3, "light-rail": 4}
 
     def parse_schedules(value: str) -> list[int]:
         times = []

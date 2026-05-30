@@ -19,6 +19,9 @@ def _compute_stops_layer_data(
     gmetro_path: str,
     metro_easyway_path: str,
     gtfs_dir: str,
+    easyway_tram_path: str = "",
+    osm_tram_stops_path: str = "",
+    osm_tram_fast_stops_path: str = "",
 ) -> list:
     """
     Повертає список dict'ів для кожної зупинки (bus/trol/metro/tram):
@@ -172,7 +175,35 @@ def _compute_stops_layer_data(
                 "stop_name": str(getattr(row, "stop_name", "")),
             })
 
-    # ── 3. Tram (GTFS) ────────────────────────────────────────────────────
+    # ── 3. Tram easyway (tram + light-rail) ──────────────────────────────
+    if easyway_tram_path and os.path.exists(easyway_tram_path):
+        et = pd.read_csv(easyway_tram_path)
+        et = et[et["calendar"].isin(["Weekdays", "All Week"])].copy()
+        et = et[et["schedules"] != r"\N"].copy()
+        et["stop_id"] = et["stop_id"].astype(str)
+        et["route_id_str"] = et["transport"].astype(str) + "_" + et["route_id"].astype(str)
+        et["times"] = et["schedules"].apply(parse_schedules)
+        et["peak_count"] = et["times"].apply(lambda t: sum(1 for s in t if in_peak(s)))
+
+        for row in et.itertuples(index=False):
+            sname = str(getattr(row, "stop_name", ""))
+            if sname and sname not in ("nan", ""):
+                stop_names_global[str(row.stop_id)] = sname
+
+        _build_next_stop_map_from_df(et, "route_id_str", "direction", "index", "stop_id")
+
+        for row in et[et["peak_count"] > 0].itertuples(index=False):
+            records.append({
+                "stop_id":    str(row.stop_id),
+                "transport":  str(row.transport),
+                "route":      str(row.route),
+                "route_id":   row.route_id_str,
+                "direction":  str(row.direction),
+                "peak_count": int(row.peak_count),
+                "stop_name":  str(getattr(row, "stop_name", "")),
+            })
+
+    # ── 4. Tram (GTFS) ────────────────────────────────────────────────────
     routes_path     = os.path.join(gtfs_dir, "routes.txt")
     trips_path      = os.path.join(gtfs_dir, "trips.txt")
     stop_times_path = os.path.join(gtfs_dir, "stop_times.txt")
@@ -290,6 +321,25 @@ def _compute_stops_layer_data(
             bm.merge(gm_gdf[["osm_id", "lon", "lat"]], on="osm_id", how="left")
             [["stop_id", "lon", "lat"]]
         )
+
+    if easyway_tram_path and os.path.exists(easyway_tram_path):
+        tram_bridge_all = pd.read_csv(easyway_tram_path, usecols=["osm_id", "stop_id", "transport"]).dropna(subset=["osm_id", "stop_id"])
+        tram_bridge_all["osm_id"] = tram_bridge_all["osm_id"].astype(str)
+        tram_bridge_all["stop_id"] = tram_bridge_all["stop_id"].astype(str)
+        for transport_val, stops_csv in [("tram", osm_tram_stops_path), ("light-rail", osm_tram_fast_stops_path)]:
+            if not stops_csv or not os.path.exists(stops_csv):
+                continue
+            part = tram_bridge_all[tram_bridge_all["transport"] == transport_val][["osm_id", "stop_id"]].drop_duplicates()
+            raw = pd.read_csv(stops_csv).dropna(subset=["geometry"]).copy()
+            raw["geometry"] = raw["geometry"].map(_wkt.loads)
+            raw["osm_id"] = raw.index.astype(str)
+            gdf = gpd.GeoDataFrame(raw, geometry="geometry", crs="EPSG:4326")
+            gdf = gdf[gdf.geometry.geom_type == "Point"].copy()
+            gdf["lon"] = gdf.geometry.x
+            gdf["lat"] = gdf.geometry.y
+            coord_frames.append(
+                part.merge(gdf[["osm_id", "lon", "lat"]], on="osm_id", how="left")[["stop_id", "lon", "lat"]]
+            )
 
     if g_stops_full_df is not None:
         coord_frames.append(
@@ -788,6 +838,9 @@ def run() -> None:
         gmetro_path=gmetro_path,
         metro_easyway_path=bridge_metro_path.replace("osm_easyway_metro_data.csv", "easyway_metro.csv"),
         gtfs_dir=gtfs_dir,
+        easyway_tram_path="../gtfs_static/easyway_tram_data.csv",
+        osm_tram_stops_path="../gtfs_static/osm_tram_stops.csv",
+        osm_tram_fast_stops_path="../gtfs_static/osm_tram_fast_stops.csv",
     )
 
     print(f"  catchment_results:   {len(catchment_results)} закладів")

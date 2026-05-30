@@ -31,6 +31,7 @@ def run() -> None:
     CATCHMENT_BUILDINGS = PROCESSED_DIR / "catchment_buildings_baseline.parquet"
     EASYWAY_ROUTES = Path("../gtfs_static/easyway_routes.csv")
     EASYWAY_METRO = Path("../gtfs_static/easyway_metro.csv")
+    EASYWAY_TRAM = Path("../gtfs_static/easyway_tram_data.csv")
 
     SUMMARY_JSON = PROCESSED_DIR / "rl_target_group_debug_summary.json"
     ROUTES_CSV = PROCESSED_DIR / "rl_target_group_routes.csv"
@@ -80,6 +81,8 @@ def run() -> None:
     easyway_parts = [pd.read_csv(EASYWAY_ROUTES)]
     if EASYWAY_METRO.exists():
         easyway_parts.append(pd.read_csv(EASYWAY_METRO))
+    if EASYWAY_TRAM.exists():
+        easyway_parts.append(pd.read_csv(EASYWAY_TRAM))
     easyway = pd.concat(easyway_parts, ignore_index=True)
     easyway = easyway[easyway["schedules"] != r"\N"].copy()
     easyway["route_id"] = easyway["route_id"].astype(str)

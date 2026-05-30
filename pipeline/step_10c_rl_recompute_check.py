@@ -31,6 +31,7 @@ def run() -> None:
     DISPATCH_ROUTE_STATS = PROCESSED_DIR / "dispatch_route_stats.csv"
     EASYWAY_ROUTES = Path("../gtfs_static/easyway_routes.csv")
     EASYWAY_METRO = Path("../gtfs_static/easyway_metro.csv")
+    EASYWAY_TRAM = Path("../gtfs_static/easyway_tram_data.csv")
 
     OUTPUT_CSV = PROCESSED_DIR / "rl_recompute_check_targets.csv"
     OUTPUT_JSON = PROCESSED_DIR / "rl_recompute_check_summary.json"
@@ -82,6 +83,8 @@ def run() -> None:
     easyway_parts = [pd.read_csv(EASYWAY_ROUTES)]
     if EASYWAY_METRO.exists():
         easyway_parts.append(pd.read_csv(EASYWAY_METRO))
+    if EASYWAY_TRAM.exists():
+        easyway_parts.append(pd.read_csv(EASYWAY_TRAM))
     easyway = pd.concat(easyway_parts, ignore_index=True)
 
     index_df["facility_id"] = index_df["facility_id"].astype(str)

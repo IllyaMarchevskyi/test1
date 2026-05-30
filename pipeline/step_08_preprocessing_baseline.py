@@ -149,6 +149,7 @@ def run_entropy() -> None:
     PROCESSED_DIR = "./data/processed"
     STOP_FAC_EXIT_PATH = f"{PROCESSED_DIR}/stop_to_fac_exit_baseline.parquet"
     EASYWAY_PATH = "../gtfs_static/easyway_routes.csv"
+    EASYWAY_TRAM_PATH = "../gtfs_static/easyway_tram_data.csv"
     SCORES_PATH = cfg["paths"]["scores"]
     OUT_PARQUET = f"{PROCESSED_DIR}/facility_entropy_baseline.parquet"
     OUT_CSV = f"{PROCESSED_DIR}/facility_entropy_baseline.csv"
@@ -212,7 +213,10 @@ def run_entropy() -> None:
     facility_meta = pd.read_csv(SCORES_PATH, usecols=["facility_id", "facility_type", "name"])
     facility_meta["facility_id"] = facility_meta["facility_id"].astype(str)
 
-    easyway = pd.read_csv(EASYWAY_PATH)
+    easyway_parts = [pd.read_csv(EASYWAY_PATH)]
+    if os.path.exists(EASYWAY_TRAM_PATH):
+        easyway_parts.append(pd.read_csv(EASYWAY_TRAM_PATH))
+    easyway = pd.concat(easyway_parts, ignore_index=True)
     easyway = easyway[easyway["schedules"] != r"\N"].copy()
     easyway["stop_id"] = easyway["stop_id"].astype(str)
     easyway["route_label"] = (easyway["transport"].astype(str).str.strip() + " " + easyway["route"].astype(str).str.strip()).str.strip()
