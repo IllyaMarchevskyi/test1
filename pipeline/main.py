@@ -14,6 +14,7 @@ STEPS = [
     # ── Підготовка даних ─────────────────────────────────────────────────────
     ("07a",   "pipeline.step_07a_precompute_buildings_baseline", "Будинки, зупинки → кеш Dijkstra"),
     ("07b",   "pipeline.step_07b_transit_matrix_baseline",       "Матриця досяжності зупинок (пік/міжпік)"),
+    ("07bt",  "pipeline.step_07b_transfer",                      "Матриця досяжності з 1 пересадкою"),
     ("07c",   "pipeline.step_07c_catchment_calc_baseline",       "Catchment: скільки людей дістається до кожного закладу"),
     ("07d",   "pipeline.step_07d_results_map_baseline",          "Інтерактивна карта catchment"),
     # ── Preprocessing ────────────────────────────────────────────────────────
@@ -44,6 +45,10 @@ STEP_OUTPUTS = {
         PIPELINE_DIR / "data/processed/stop_reachability_offpeak_reversed_baseline.parquet",
         PIPELINE_DIR / "data/processed/wait_times_peak_baseline.parquet",
         PIPELINE_DIR / "data/processed/wait_times_offpeak_baseline.parquet",
+    ],
+    "07bt": [
+        PIPELINE_DIR / "data/processed/stop_reachability_transfer_peak_baseline.parquet",
+        PIPELINE_DIR / "data/processed/stop_reachability_transfer_offpeak_baseline.parquet",
     ],
     "07c": [
         PIPELINE_DIR / "data/processed/catchment_results_baseline.csv",

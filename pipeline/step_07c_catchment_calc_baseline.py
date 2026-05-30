@@ -47,6 +47,10 @@ def run() -> None:
     REACH_OFFPEAK_REV_PATH = f"{PROCESSED_DIR}/stop_reachability_offpeak_reversed_baseline.parquet"
     WAIT_PEAK_PATH = f"{PROCESSED_DIR}/wait_times_peak_baseline.parquet"
     WAIT_OFFPEAK_PATH = f"{PROCESSED_DIR}/wait_times_offpeak_baseline.parquet"
+    ALLOW_TRANSFERS = bool(cfg["catchment"].get("allow_transfers", True))
+    TRANSFER_PEAK_PATH    = f"{PROCESSED_DIR}/stop_reachability_transfer_peak_baseline.parquet"
+    TRANSFER_OFFPEAK_PATH = f"{PROCESSED_DIR}/stop_reachability_transfer_offpeak_baseline.parquet"
+
     CATCHMENT_CACHE = f"{PROCESSED_DIR}/catchment_results_baseline.csv"
     BUILDINGS_CACHE = f"{PROCESSED_DIR}/catchment_buildings_baseline.parquet"
 
@@ -69,7 +73,8 @@ def run() -> None:
 
     if os.path.exists(CATCHMENT_CACHE) and os.path.exists(BUILDINGS_CACHE):
         outputs_mtime = min(os.path.getmtime(CATCHMENT_CACHE), os.path.getmtime(BUILDINGS_CACHE))
-        inputs_mtime = max(os.path.getmtime(path) for path in required_paths)
+        extra_inputs = [p for p in [TRANSFER_PEAK_PATH, TRANSFER_OFFPEAK_PATH] if os.path.exists(p)]
+        inputs_mtime = max(os.path.getmtime(path) for path in required_paths + extra_inputs)
         if outputs_mtime >= inputs_mtime:
             catchment_df = pd.read_csv(CATCHMENT_CACHE)
             catchment_buildings = pd.read_parquet(BUILDINGS_CACHE)
@@ -143,6 +148,41 @@ def run() -> None:
         (row.stop_A, row.stop_B): float(getattr(row, wait_offpeak_value_col))
         for row in wait_offpeak.itertuples(index=False)
     }
+
+    # ── Transfer matrix (1 пересадка) ──────────────────────────────────────
+    # transfer_*_dict[stop_C][stop_A] = {total_fixed_min, transfer_stop, route_*_1/2, ...}
+    # total_fixed_min = wait_1 + transit_1 + transfer_wait + transit_2 (no walk in/out)
+    transfer_peak_dict:    dict[str, dict[str, dict]] = {}
+    transfer_offpeak_dict: dict[str, dict[str, dict]] = {}
+    if ALLOW_TRANSFERS:
+        for path, target, label in [
+            (TRANSFER_PEAK_PATH,    transfer_peak_dict,    "transfer peak"),
+            (TRANSFER_OFFPEAK_PATH, transfer_offpeak_dict, "transfer offpeak"),
+        ]:
+            if os.path.exists(path):
+                df_t = pd.read_parquet(path)
+                df_t["stop_A"] = df_t["stop_A"].astype(str)
+                df_t["stop_C"] = df_t["stop_C"].astype(str)
+                for row in tqdm(df_t.itertuples(index=False), total=len(df_t), desc=f"build {label} dict"):
+                    target.setdefault(str(row.stop_C), {})[str(row.stop_A)] = {
+                        "total_fixed_min":   float(row.total_fixed_min),
+                        "wait_1_min":        float(row.wait_1_min),
+                        "transit_1_min":     float(row.transit_1_min),
+                        "transfer_wait_min": float(row.transfer_wait_min),
+                        "transit_2_min":     float(row.transit_2_min),
+                        "transfer_stop":     str(row.transfer_stop),
+                        "route_id_1":    str(row.route_id_1),
+                        "route_1":       str(row.route_1),
+                        "transport_1":   str(row.transport_1),
+                        "direction_1":   str(row.direction_1),
+                        "route_id_2":    str(row.route_id_2),
+                        "route_2":       str(row.route_2),
+                        "transport_2":   str(row.transport_2),
+                        "direction_2":   str(row.direction_2),
+                    }
+                print(f"  {label}: {sum(len(v) for v in target.values()):,} записів")
+            else:
+                print(f"  {label}: файл не знайдено ({path}), пропускаємо.")
 
     print("Precompute nearest nodes для будинків...")
     bld_nodes = ox.distance.nearest_nodes(g_proj, X=buildings.geometry.x.values, Y=buildings.geometry.y.values)
@@ -219,6 +259,56 @@ def run() -> None:
 
         return bld_min_time
 
+    def count_transit_with_transfer(
+        transfer_rev_dict: dict[str, dict[str, dict]], facility_id: str
+    ) -> dict[int, dict[str, object]]:
+        """1-transfer paths: stop_A → transfer at stop_T → stop_C → walk_out → facility."""
+        if R_TRANSIT == 0 or not transfer_rev_dict:
+            return {}
+        stops_near_fac = fac_stop_dict.get(facility_id, {})
+        bld_min_time: dict[int, dict] = {}
+
+        for stop_c, walk_out in stops_near_fac.items():
+            for stop_a, t_info in transfer_rev_dict.get(stop_c, {}).items():
+                fixed_time = t_info["total_fixed_min"] + walk_out
+                if fixed_time > R_TRANSIT:
+                    continue
+                for bid, walk_in in stop_bld_dict.get(stop_a, {}).items():
+                    total_min = walk_in + fixed_time
+                    current = bld_min_time.get(bid)
+                    current_total = float(current["total_min"]) if current is not None else float("inf")
+                    if total_min <= R_TRANSIT and total_min < current_total:
+                        t1 = t_info.get("transport_1", "")
+                        r1 = t_info.get("route_1", "")
+                        t2 = t_info.get("transport_2", "")
+                        r2 = t_info.get("route_2", "")
+                        bld_min_time[bid] = {
+                            "total_min":    float(total_min),
+                            "mode":         "transit",
+                            "walk_in_min":  float(walk_in),
+                            "wait_min":     t_info["wait_1_min"],
+                            "transit_min":  t_info["transit_1_min"] + t_info["transfer_wait_min"] + t_info["transit_2_min"],
+                            "walk_out_min": float(walk_out),
+                            "route_id":     t_info.get("route_id_1"),
+                            "route":        r1,
+                            "transport":    t1,
+                            "direction":    t_info.get("direction_1"),
+                            "route_options": f"{t1} {r1} → пересадка → {t2} {r2}".strip(),
+                            "source_stop":  str(stop_a),
+                            "dest_stop":    str(stop_c),
+                            "n_transfers":  1,
+                            "transfer_stop":  t_info.get("transfer_stop"),
+                            "route_id_2":     t_info.get("route_id_2"),
+                            "route_2":        r2,
+                            "transport_2":    t2,
+                            "direction_2":    t_info.get("direction_2"),
+                            # детальні компоненти часу (тільки для пересадочних рейсів)
+                            "transit_leg1_min":    t_info["transit_1_min"],
+                            "transfer_wait_2_min": t_info["transfer_wait_min"],
+                            "transit_leg2_min":    t_info["transit_2_min"],
+                        }
+        return bld_min_time
+
     def count_walk_direct(center_node: int) -> dict[int, float]:
         if R_WALK == 0:
             return {}
@@ -240,8 +330,10 @@ def run() -> None:
     for fac_row in tqdm(facility_rows, total=len(facility_rows), desc="Baseline 07c facilities"):
         fid = fac_row["facility_id"]
         walk_times = count_walk_direct(fac_row["center_node"])
-        transit_peak_times = count_transit_direct(rev_peak_dict, wait_peak_dict, fid)
+        transit_peak_times    = count_transit_direct(rev_peak_dict,    wait_peak_dict,    fid)
         transit_offpeak_times = count_transit_direct(rev_offpeak_dict, wait_offpeak_dict, fid)
+        transfer_peak_times    = count_transit_with_transfer(transfer_peak_dict,    fid)
+        transfer_offpeak_times = count_transit_with_transfer(transfer_offpeak_dict, fid)
 
         def _walk_entry(t: float) -> dict:
             return {
@@ -250,6 +342,9 @@ def run() -> None:
                 "walk_out_min": None, "route_id": None, "route": None,
                 "transport": None, "direction": None, "route_options": None,
                 "source_stop": None, "dest_stop": None,
+                "n_transfers": 0, "transfer_stop": None,
+                "route_id_2": None, "route_2": None, "transport_2": None, "direction_2": None,
+                "transit_leg1_min": None, "transfer_wait_2_min": None, "transit_leg2_min": None,
             }
 
         # Only include walk buildings that fall in an active walk group.
@@ -264,6 +359,14 @@ def run() -> None:
                 best_peak[bid] = transit_info
 
         for bid, transit_info in transit_offpeak_times.items():
+            if float(transit_info["total_min"]) < float(best_offpeak.get(bid, {"total_min": float("inf")})["total_min"]):
+                best_offpeak[bid] = transit_info
+
+        for bid, transit_info in transfer_peak_times.items():
+            if float(transit_info["total_min"]) < float(best_peak.get(bid, {"total_min": float("inf")})["total_min"]):
+                best_peak[bid] = transit_info
+
+        for bid, transit_info in transfer_offpeak_times.items():
             if float(transit_info["total_min"]) < float(best_offpeak.get(bid, {"total_min": float("inf")})["total_min"]):
                 best_offpeak[bid] = transit_info
 
@@ -326,6 +429,15 @@ def run() -> None:
                     peak_detail.get("route_options"),
                     peak_detail.get("source_stop"),
                     peak_detail.get("dest_stop"),
+                    peak_detail.get("n_transfers", 0),
+                    peak_detail.get("transfer_stop"),
+                    peak_detail.get("route_id_2"),
+                    peak_detail.get("route_2"),
+                    peak_detail.get("transport_2"),
+                    peak_detail.get("direction_2"),
+                    peak_detail.get("transit_leg1_min"),
+                    peak_detail.get("transfer_wait_2_min"),
+                    peak_detail.get("transit_leg2_min"),
                     offpeak_detail.get("mode"),
                     offpeak_detail.get("total_min"),
                     offpeak_detail.get("walk_in_min"),
@@ -339,6 +451,15 @@ def run() -> None:
                     offpeak_detail.get("route_options"),
                     offpeak_detail.get("source_stop"),
                     offpeak_detail.get("dest_stop"),
+                    offpeak_detail.get("n_transfers", 0),
+                    offpeak_detail.get("transfer_stop"),
+                    offpeak_detail.get("route_id_2"),
+                    offpeak_detail.get("route_2"),
+                    offpeak_detail.get("transport_2"),
+                    offpeak_detail.get("direction_2"),
+                    offpeak_detail.get("transit_leg1_min"),
+                    offpeak_detail.get("transfer_wait_2_min"),
+                    offpeak_detail.get("transit_leg2_min"),
                 )
             )
 
@@ -348,6 +469,8 @@ def run() -> None:
                 "walk_buildings": len(walk_times),
                 "peak_transit_buildings": len(transit_peak_times),
                 "offpeak_transit_buildings": len(transit_offpeak_times),
+                "peak_transfer_buildings": len(transfer_peak_times),
+                "offpeak_transfer_buildings": len(transfer_offpeak_times),
                 "exit_stops": len(fac_stop_dict.get(fid, {})),
             }
         )
@@ -373,6 +496,15 @@ def run() -> None:
             "peak_route_options",
             "peak_source_stop",
             "peak_dest_stop",
+            "peak_n_transfers",
+            "peak_transfer_stop",
+            "peak_route_id_2",
+            "peak_route_2",
+            "peak_transport_2",
+            "peak_direction_2",
+            "peak_transit_leg1_min",
+            "peak_transfer_wait_2_min",
+            "peak_transit_leg2_min",
             "offpeak_mode",
             "offpeak_total_min",
             "offpeak_walk_in_min",
@@ -386,6 +518,15 @@ def run() -> None:
             "offpeak_route_options",
             "offpeak_source_stop",
             "offpeak_dest_stop",
+            "offpeak_n_transfers",
+            "offpeak_transfer_stop",
+            "offpeak_route_id_2",
+            "offpeak_route_2",
+            "offpeak_transport_2",
+            "offpeak_direction_2",
+            "offpeak_transit_leg1_min",
+            "offpeak_transfer_wait_2_min",
+            "offpeak_transit_leg2_min",
         ],
     )
     catchment_df.to_csv(CATCHMENT_CACHE, index=False, encoding="utf-8")
@@ -397,6 +538,9 @@ def run() -> None:
     print(f"Середній walk_buildings: {diag_df['walk_buildings'].mean():.1f}")
     print(f"Середній peak transit buildings: {diag_df['peak_transit_buildings'].mean():.1f}")
     print(f"Середній offpeak transit buildings: {diag_df['offpeak_transit_buildings'].mean():.1f}")
+    if ALLOW_TRANSFERS:
+        print(f"Середній peak transfer buildings (1 пересадка): {diag_df['peak_transfer_buildings'].mean():.1f}")
+        print(f"Середній offpeak transfer buildings (1 пересадка): {diag_df['offpeak_transfer_buildings'].mean():.1f}")
 
 
 if __name__ == "__main__":

@@ -1124,14 +1124,18 @@ def run() -> None:
 
         clearStopPreview();
 
-        const sourceStop    = currentMode === 'peak' ? props.peak_source_stop    : props.offpeak_source_stop;
-        const destStop      = currentMode === 'peak' ? props.peak_dest_stop      : props.offpeak_dest_stop;
-        const sourceStopLon = currentMode === 'peak' ? props.peak_source_stop_lon : props.offpeak_source_stop_lon;
-        const sourceStopLat = currentMode === 'peak' ? props.peak_source_stop_lat : props.offpeak_source_stop_lat;
-        const destStopLon   = currentMode === 'peak' ? props.peak_dest_stop_lon  : props.offpeak_dest_stop_lon;
-        const destStopLat   = currentMode === 'peak' ? props.peak_dest_stop_lat  : props.offpeak_dest_stop_lat;
-        const mode          = currentMode === 'peak' ? props.peak_mode           : props.offpeak_mode;
-        const paths         = props._paths || {{}};
+        const sourceStop      = currentMode === 'peak' ? props.peak_source_stop       : props.offpeak_source_stop;
+        const destStop        = currentMode === 'peak' ? props.peak_dest_stop         : props.offpeak_dest_stop;
+        const transferStopId  = currentMode === 'peak' ? props.peak_transfer_stop     : props.offpeak_transfer_stop;
+        const nTransfersP     = currentMode === 'peak' ? (props.peak_n_transfers || 0): (props.offpeak_n_transfers || 0);
+        const sourceStopLon   = currentMode === 'peak' ? props.peak_source_stop_lon   : props.offpeak_source_stop_lon;
+        const sourceStopLat   = currentMode === 'peak' ? props.peak_source_stop_lat   : props.offpeak_source_stop_lat;
+        const destStopLon     = currentMode === 'peak' ? props.peak_dest_stop_lon     : props.offpeak_dest_stop_lon;
+        const destStopLat     = currentMode === 'peak' ? props.peak_dest_stop_lat     : props.offpeak_dest_stop_lat;
+        const transferStopLon = currentMode === 'peak' ? props.peak_transfer_stop_lon : props.offpeak_transfer_stop_lon;
+        const transferStopLat = currentMode === 'peak' ? props.peak_transfer_stop_lat : props.offpeak_transfer_stop_lat;
+        const mode            = currentMode === 'peak' ? props.peak_mode              : props.offpeak_mode;
+        const paths           = props._paths || {{}};
 
         selectedStopsLayer = L.layerGroup();
 
@@ -1166,7 +1170,15 @@ def run() -> None:
             L.circleMarker([sourceStopLat, sourceStopLon], {{
                 radius: 9, color: '#111111', fillColor: '#00BFFF',
                 fillOpacity: 0.95, weight: 2, interactive: false,
-            }}).bindTooltip('Зупинка посадки: ' + (sourceStop || ''), {{opacity: 0.95}})
+            }}).bindTooltip('&#9654; Зупинка посадки: ' + (sourceStop || ''), {{opacity: 0.95}})
+              .addTo(selectedStopsLayer);
+        }}
+
+        if (nTransfersP > 0 && typeof transferStopLon === 'number' && typeof transferStopLat === 'number') {{
+            L.circleMarker([transferStopLat, transferStopLon], {{
+                radius: 10, color: '#111111', fillColor: '#9B59B6',
+                fillOpacity: 0.95, weight: 2, interactive: false,
+            }}).bindTooltip('&#8644; Зупинка пересадки: ' + (transferStopId || ''), {{opacity: 0.95}})
               .addTo(selectedStopsLayer);
         }}
 
@@ -1174,7 +1186,7 @@ def run() -> None:
             L.circleMarker([destStopLat, destStopLon], {{
                 radius: 9, color: '#111111', fillColor: '#FFD700',
                 fillOpacity: 0.95, weight: 2, interactive: false,
-            }}).bindTooltip('Зупинка виходу: ' + (destStop || ''), {{opacity: 0.95}})
+            }}).bindTooltip('&#9632; Зупинка виходу: ' + (destStop || ''), {{opacity: 0.95}})
               .addTo(selectedStopsLayer);
         }}
 
@@ -1216,6 +1228,13 @@ def run() -> None:
             const buildingLevels = props.building_levels;
             const sourceStop = currentMode === 'peak' ? props.peak_source_stop : props.offpeak_source_stop;
             const destStop = currentMode === 'peak' ? props.peak_dest_stop : props.offpeak_dest_stop;
+            const nTransfers       = currentMode === 'peak' ? (props.peak_n_transfers || 0)      : (props.offpeak_n_transfers || 0);
+            const transferStop     = currentMode === 'peak' ? props.peak_transfer_stop            : props.offpeak_transfer_stop;
+            const transitLeg1Min   = currentMode === 'peak' ? props.peak_transit_leg1_min         : props.offpeak_transit_leg1_min;
+            const transferWait2Min = currentMode === 'peak' ? props.peak_transfer_wait_2_min      : props.offpeak_transfer_wait_2_min;
+            const transitLeg2Min   = currentMode === 'peak' ? props.peak_transit_leg2_min         : props.offpeak_transit_leg2_min;
+            const transferStopLon  = currentMode === 'peak' ? props.peak_transfer_stop_lon        : props.offpeak_transfer_stop_lon;
+            const transferStopLat  = currentMode === 'peak' ? props.peak_transfer_stop_lat        : props.offpeak_transfer_stop_lat;
             const sourceStopLon = currentMode === 'peak' ? props.peak_source_stop_lon : props.offpeak_source_stop_lon;
             const sourceStopLat = currentMode === 'peak' ? props.peak_source_stop_lat : props.offpeak_source_stop_lat;
             const destStopLon = currentMode === 'peak' ? props.peak_dest_stop_lon : props.offpeak_dest_stop_lon;
@@ -1226,18 +1245,38 @@ def run() -> None:
             if (typeof totalMin === 'number') tooltip += '<br>Загальний час: ' + totalMin.toFixed(1) + ' хв';
             tooltip += '<br>Група: ' + group;
             if (mode === 'transit') {{
-                const chosenRoute = [transport, route].filter(Boolean).join(' ');
-                if (chosenRoute) tooltip += '<br>Обраний маршрут: ' + chosenRoute;
-                if (routeId) tooltip += '<br>route_id: ' + routeId;
-                if (routeOptions && routeOptions !== chosenRoute) {{
-                    tooltip += '<br>Альтернативи: ' + routeOptions;
+                if (nTransfers > 0) {{
+                    // ── Пересадочний маршрут ──────────────────────────────
+                    const leg1Label = [transport, route].filter(Boolean).join(' ');
+                    const leg2Label = [props[currentMode === 'peak' ? 'peak_transport_2' : 'offpeak_transport_2'],
+                                       props[currentMode === 'peak' ? 'peak_route_2'     : 'offpeak_route_2']]
+                                      .filter(Boolean).join(' ');
+                    tooltip += '<br><span style="color:#888;font-size:10px">── Маршрут 1 ──</span>';
+                    if (sourceStop) tooltip += '<br>&#9654; Посадка на зуп.: ' + sourceStop;
+                    if (typeof walkInMin === 'number') tooltip += '<br>&#8203;&nbsp; пішки до зупинки: ' + walkInMin.toFixed(1) + ' хв';
+                    if (typeof waitMin === 'number') tooltip += '<br>&#8203;&nbsp; очікування ' + (leg1Label || '') + ': ' + waitMin.toFixed(1) + ' хв';
+                    if (typeof transitLeg1Min === 'number') tooltip += '<br>&#8203;&nbsp; у дорозі: ' + transitLeg1Min.toFixed(1) + ' хв';
+                    tooltip += '<br><span style="color:#888;font-size:10px">── Пересадка ──</span>';
+                    if (transferStop) tooltip += '<br>&#8644; Зупинка пересадки: ' + transferStop;
+                    if (typeof transferWait2Min === 'number') tooltip += '<br>&#8203;&nbsp; очікування ' + (leg2Label || '') + ': ' + transferWait2Min.toFixed(1) + ' хв';
+                    tooltip += '<br><span style="color:#888;font-size:10px">── Маршрут 2 ──</span>';
+                    if (typeof transitLeg2Min === 'number') tooltip += '<br>&#8203;&nbsp; у дорозі: ' + transitLeg2Min.toFixed(1) + ' хв';
+                    if (destStop) tooltip += '<br>&#9632; Виход на зуп.: ' + destStop;
+                    if (typeof walkOutMin === 'number') tooltip += '<br>&#8203;&nbsp; пішки до закладу: ' + walkOutMin.toFixed(1) + ' хв';
+                }} else {{
+                    // ── Прямий маршрут ────────────────────────────────────
+                    const chosenRoute = [transport, route].filter(Boolean).join(' ');
+                    if (chosenRoute) tooltip += '<br>Маршрут: ' + chosenRoute;
+                    if (routeOptions && routeOptions !== chosenRoute) {{
+                        tooltip += '<br>Альтернативи: ' + routeOptions;
+                    }}
+                    if (typeof walkInMin === 'number') tooltip += '<br>До зупинки: ' + walkInMin.toFixed(1) + ' хв';
+                    if (typeof waitMin === 'number') tooltip += '<br>Очікування: ' + waitMin.toFixed(1) + ' хв';
+                    if (typeof transitMin === 'number') tooltip += '<br>У транспорті: ' + transitMin.toFixed(1) + ' хв';
+                    if (typeof walkOutMin === 'number') tooltip += '<br>Від зупинки до закладу: ' + walkOutMin.toFixed(1) + ' хв';
+                    if (sourceStop) tooltip += '<br>Зупинка посадки: ' + sourceStop;
+                    if (destStop) tooltip += '<br>Зупинка виходу: ' + destStop;
                 }}
-                if (typeof walkInMin === 'number') tooltip += '<br>До зупинки: ' + walkInMin.toFixed(1) + ' хв';
-                if (typeof waitMin === 'number') tooltip += '<br>Очікування: ' + waitMin.toFixed(1) + ' хв';
-                if (typeof transitMin === 'number') tooltip += '<br>У транспорті: ' + transitMin.toFixed(1) + ' хв';
-                if (typeof walkOutMin === 'number') tooltip += '<br>Від зупинки до закладу: ' + walkOutMin.toFixed(1) + ' хв';
-                if (sourceStop) tooltip += '<br>Зупинка посадки: ' + sourceStop;
-                if (destStop) tooltip += '<br>Зупинка виходу: ' + destStop;
             }} else if (mode === 'walk') {{
                 tooltip += '<br>Режим: пішки';
                 const nearStops = NEAREST_STOPS[String(props.building_id)];

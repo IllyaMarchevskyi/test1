@@ -97,6 +97,15 @@ def _export_facility_geojson(
                 "building_levels",
                 "peak_source_stop",
                 "peak_dest_stop",
+                "peak_n_transfers",
+                "peak_transfer_stop",
+                "peak_transit_leg1_min",
+                "peak_transfer_wait_2_min",
+                "peak_transit_leg2_min",
+                "peak_transport_2",
+                "peak_route_2",
+                "peak_transfer_stop_lon",
+                "peak_transfer_stop_lat",
                 "peak_source_stop_lon",
                 "peak_source_stop_lat",
                 "peak_dest_stop_lon",
@@ -113,6 +122,15 @@ def _export_facility_geojson(
                 "offpeak_route_options",
                 "offpeak_source_stop",
                 "offpeak_dest_stop",
+                "offpeak_n_transfers",
+                "offpeak_transfer_stop",
+                "offpeak_transit_leg1_min",
+                "offpeak_transfer_wait_2_min",
+                "offpeak_transit_leg2_min",
+                "offpeak_transport_2",
+                "offpeak_route_2",
+                "offpeak_transfer_stop_lon",
+                "offpeak_transfer_stop_lat",
                 "offpeak_source_stop_lon",
                 "offpeak_source_stop_lat",
                 "offpeak_dest_stop_lon",
@@ -143,6 +161,15 @@ def _export_facility_geojson(
                     "building_levels": None if pd.isna(row.building_levels) else float(row.building_levels),
                     "peak_source_stop": _json_group(row.peak_source_stop),
                     "peak_dest_stop": _json_group(row.peak_dest_stop),
+                    "peak_n_transfers": int(row.peak_n_transfers) if not pd.isna(row.peak_n_transfers) else 0,
+                    "peak_transfer_stop": _json_group(row.peak_transfer_stop),
+                    "peak_transit_leg1_min": None if pd.isna(row.peak_transit_leg1_min) else float(row.peak_transit_leg1_min),
+                    "peak_transfer_wait_2_min": None if pd.isna(row.peak_transfer_wait_2_min) else float(row.peak_transfer_wait_2_min),
+                    "peak_transit_leg2_min": None if pd.isna(row.peak_transit_leg2_min) else float(row.peak_transit_leg2_min),
+                    "peak_transport_2": _json_group(row.peak_transport_2),
+                    "peak_route_2": _json_group(row.peak_route_2),
+                    "peak_transfer_stop_lon": None if pd.isna(row.peak_transfer_stop_lon) else float(row.peak_transfer_stop_lon),
+                    "peak_transfer_stop_lat": None if pd.isna(row.peak_transfer_stop_lat) else float(row.peak_transfer_stop_lat),
                     "peak_source_stop_lon": None if pd.isna(row.peak_source_stop_lon) else float(row.peak_source_stop_lon),
                     "peak_source_stop_lat": None if pd.isna(row.peak_source_stop_lat) else float(row.peak_source_stop_lat),
                     "peak_dest_stop_lon": None if pd.isna(row.peak_dest_stop_lon) else float(row.peak_dest_stop_lon),
@@ -159,6 +186,15 @@ def _export_facility_geojson(
                     "offpeak_route_options": _json_group(row.offpeak_route_options),
                     "offpeak_source_stop": _json_group(row.offpeak_source_stop),
                     "offpeak_dest_stop": _json_group(row.offpeak_dest_stop),
+                    "offpeak_n_transfers": int(row.offpeak_n_transfers) if not pd.isna(row.offpeak_n_transfers) else 0,
+                    "offpeak_transfer_stop": _json_group(row.offpeak_transfer_stop),
+                    "offpeak_transit_leg1_min": None if pd.isna(row.offpeak_transit_leg1_min) else float(row.offpeak_transit_leg1_min),
+                    "offpeak_transfer_wait_2_min": None if pd.isna(row.offpeak_transfer_wait_2_min) else float(row.offpeak_transfer_wait_2_min),
+                    "offpeak_transit_leg2_min": None if pd.isna(row.offpeak_transit_leg2_min) else float(row.offpeak_transit_leg2_min),
+                    "offpeak_transport_2": _json_group(row.offpeak_transport_2),
+                    "offpeak_route_2": _json_group(row.offpeak_route_2),
+                    "offpeak_transfer_stop_lon": None if pd.isna(row.offpeak_transfer_stop_lon) else float(row.offpeak_transfer_stop_lon),
+                    "offpeak_transfer_stop_lat": None if pd.isna(row.offpeak_transfer_stop_lat) else float(row.offpeak_transfer_stop_lat),
                     "offpeak_source_stop_lon": None if pd.isna(row.offpeak_source_stop_lon) else float(row.offpeak_source_stop_lon),
                     "offpeak_source_stop_lat": None if pd.isna(row.offpeak_source_stop_lat) else float(row.offpeak_source_stop_lat),
                     "offpeak_dest_stop_lon": None if pd.isna(row.offpeak_dest_stop_lon) else float(row.offpeak_dest_stop_lon),
@@ -265,6 +301,13 @@ def export_catchment_map_data(
         "building_levels",
         "peak_source_stop",
         "peak_dest_stop",
+        "peak_n_transfers",
+        "peak_transfer_stop",
+        "peak_transit_leg1_min",
+        "peak_transfer_wait_2_min",
+        "peak_transit_leg2_min",
+        "peak_transport_2",
+        "peak_route_2",
         "offpeak_mode",
         "offpeak_total_min",
         "offpeak_walk_in_min",
@@ -277,6 +320,13 @@ def export_catchment_map_data(
         "offpeak_route_options",
         "offpeak_source_stop",
         "offpeak_dest_stop",
+        "offpeak_n_transfers",
+        "offpeak_transfer_stop",
+        "offpeak_transit_leg1_min",
+        "offpeak_transfer_wait_2_min",
+        "offpeak_transit_leg2_min",
+        "offpeak_transport_2",
+        "offpeak_route_2",
     ]
     for column in optional_detail_columns:
         if column not in catchment_buildings.columns:
@@ -301,10 +351,18 @@ def export_catchment_map_data(
         off_dst = stop_coords.rename(
             columns={"stop_id": "offpeak_dest_stop", "lon": "offpeak_dest_stop_lon", "lat": "offpeak_dest_stop_lat"}
         )
+        peak_tr = stop_coords.rename(
+            columns={"stop_id": "peak_transfer_stop", "lon": "peak_transfer_stop_lon", "lat": "peak_transfer_stop_lat"}
+        )
+        off_tr = stop_coords.rename(
+            columns={"stop_id": "offpeak_transfer_stop", "lon": "offpeak_transfer_stop_lon", "lat": "offpeak_transfer_stop_lat"}
+        )
         merged = merged.merge(peak_src, on="peak_source_stop", how="left", copy=False)
         merged = merged.merge(peak_dst, on="peak_dest_stop", how="left", copy=False)
+        merged = merged.merge(peak_tr, on="peak_transfer_stop", how="left", copy=False)
         merged = merged.merge(off_src, on="offpeak_source_stop", how="left", copy=False)
         merged = merged.merge(off_dst, on="offpeak_dest_stop", how="left", copy=False)
+        merged = merged.merge(off_tr, on="offpeak_transfer_stop", how="left", copy=False)
     for column in [
         "peak_source_stop_lon",
         "peak_source_stop_lat",
@@ -314,6 +372,10 @@ def export_catchment_map_data(
         "offpeak_source_stop_lat",
         "offpeak_dest_stop_lon",
         "offpeak_dest_stop_lat",
+        "peak_transfer_stop_lon",
+        "peak_transfer_stop_lat",
+        "offpeak_transfer_stop_lon",
+        "offpeak_transfer_stop_lat",
     ]:
         if column not in merged.columns:
             merged[column] = None
@@ -342,6 +404,15 @@ def export_catchment_map_data(
                 "building_levels",
                 "peak_source_stop",
                 "peak_dest_stop",
+                "peak_n_transfers",
+                "peak_transfer_stop",
+                "peak_transit_leg1_min",
+                "peak_transfer_wait_2_min",
+                "peak_transit_leg2_min",
+                "peak_transport_2",
+                "peak_route_2",
+                "peak_transfer_stop_lon",
+                "peak_transfer_stop_lat",
                 "peak_source_stop_lon",
                 "peak_source_stop_lat",
                 "peak_dest_stop_lon",
@@ -358,6 +429,15 @@ def export_catchment_map_data(
                 "offpeak_route_options",
                 "offpeak_source_stop",
                 "offpeak_dest_stop",
+                "offpeak_n_transfers",
+                "offpeak_transfer_stop",
+                "offpeak_transit_leg1_min",
+                "offpeak_transfer_wait_2_min",
+                "offpeak_transit_leg2_min",
+                "offpeak_transport_2",
+                "offpeak_route_2",
+                "offpeak_transfer_stop_lon",
+                "offpeak_transfer_stop_lat",
                 "offpeak_source_stop_lon",
                 "offpeak_source_stop_lat",
                 "offpeak_dest_stop_lon",
