@@ -212,17 +212,18 @@ def run() -> None:
         for i, stop_a in enumerate(stop_list):
             sid_a = str(stop_a["stop_id"])
             times_a = stop_a["times"]
-            idx_a = int(stop_a["index"])
             if not times_a:
                 continue
-            for stop_b in stop_list[i + 1:]:
+            for j, stop_b in enumerate(stop_list[i + 1:], start=i + 1):
                 sid_b = str(stop_b["stop_id"])
                 times_b = stop_b["times"]
-                idx_b = int(stop_b["index"])
                 if not times_b:
                     continue
 
-                stop_span = max(1, idx_b - idx_a)
+                # Use sequential position difference (j-i), not raw index values.
+                # Raw easyway indices are sparse (gaps like 1,4,6,8...) which would
+                # inflate min_plausible_transit and filter out valid short trips.
+                stop_span = j - i
                 min_plausible_transit = max(MIN_TRANSIT_MIN, MIN_PER_STOP_SPAN_MIN * stop_span)
                 matches = match_trip_times(times_a, times_b, min_plausible_transit)
                 filtered_by_span += max(0, min(len(times_a), len(times_b)) - len(matches))
@@ -326,7 +327,9 @@ def run() -> None:
         variance = sum((value - avg_interval) ** 2 for value in intervals) / len(intervals)
         sigma_min = math.sqrt(variance)
         avg_wait_min = avg_interval / 2.0
-        adj_wait_min = avg_wait_min + 0.5 * sigma_min
+        # Correct formula from queuing theory: E[wait] = H/2 + Var[H]/(2H)
+        # where H = avg_interval (both in minutes). Previous 0.5*sigma overestimated.
+        adj_wait_min = avg_wait_min + variance / (2.0 * avg_interval) if avg_interval > 0 else avg_wait_min
         return {
             "avg_wait_min": avg_wait_min,
             "sigma_min": sigma_min,

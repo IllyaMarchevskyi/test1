@@ -27,6 +27,8 @@ STEPS = [
     ("10diag","pipeline.step_10_diagnostics",                    "RL-діагностика (розклади, recompute, частоти, target, probe)"),
     ("10g",   "pipeline.step_10g_apply_best_probe",              "Greedy-оптимізація маршрутних частот"),
     ("10h",   "pipeline.step_10h_practical_recommendations",     "Практичні рекомендації → звіт"),
+    # ── Регресія + SHAP + Транспортні пустелі ────────────────────────────────
+    ("11",    "pipeline.step_11_regression_shap",              "Регресія I*_peak + SHAP + транспортні пустелі"),
 ]
 
 STEP_OUTPUTS = {
@@ -128,6 +130,18 @@ STEP_OUTPUTS = {
         PIPELINE_DIR / "data/processed/rl_practical_recommendations.csv",
         PIPELINE_DIR / "data/processed/rl_practical_recommendations.json",
         PIPELINE_DIR / "data/outputs/rl_recommendations_report.md",
+    ],
+    "11": [
+        PIPELINE_DIR / "data/processed/regression_features_baseline.csv",
+        PIPELINE_DIR / "data/processed/regression_metrics_baseline.json",
+        PIPELINE_DIR / "data/processed/regression_predictions_baseline.csv",
+        PIPELINE_DIR / "data/processed/regression_feature_importance_baseline.csv",
+        PIPELINE_DIR / "data/processed/regression_shap_values_baseline.csv",
+        PIPELINE_DIR / "data/processed/transport_deserts_baseline.csv",
+        PIPELINE_DIR / "data/outputs/regression_feature_importance_baseline.png",
+        PIPELINE_DIR / "data/outputs/regression_shap_summary_baseline.png",
+        PIPELINE_DIR / "data/outputs/regression_residuals_baseline.png",
+        PIPELINE_DIR / "data/outputs/transport_deserts_map_baseline.html",
     ],
 }
 
