@@ -1,139 +1,175 @@
 # ╔══════════════════════════════════════════════════════════╗
-# ║                          CONFIG                          ║
+# ║                       CONFIG.TOML                        ║
+# ║   Головний файл конфігурації дипломної роботи            ║
+# ║   Зміни тут автоматично підхоплюються всіма кроками.     ║
 # ╚══════════════════════════════════════════════════════════╝
 
+
+# ── Місто ────────────────────────────────────────────────────────────────────
+# Використовується: усі кроки (через config_loader.py)
+
 [city]
-name = "Kyiv, Ukraine"
+name       = "Kyiv, Ukraine"
 center_lat = 50.4501
 center_lon = 30.5234
 crs_metric = "EPSG:32636"   # UTM зона 36N — для метричних розрахунків
 
+
+# ── Шляхи до файлів ───────────────────────────────────────────────────────────
+# Тут лише ті, що реально читаються через cfg["paths"][...].
+# Більшість проміжних файлів прописані безпосередньо в кожному кроці pipeline.
+# Використовується: 07a, 07c, 07d, 09a, 10g, 10h, 11
+
 [paths]
-gtfs        = "../gtfs_static/"
-stops       = "../data/processed/stops.gpkg"
-osm_stops   = "../data/osm/osm_stops.gpkg"
-metro       = "../data/osm/metro.gpkg"
-hospitals   = "../data/osm/hospitals.gpkg"
-schools     = "../data/osm/schools.gpkg"
-walk_graph  = "./data/osm/kyiv_walk_graph.pkl"
-isochrones  = "../data/processed/isochrone_results.parquet"
-scores      = "../data/processed/accessibility_scores.csv"
-clustered   = "../data/processed/clustered_facilities.csv"
-population  = "../data/census/population.csv"
+scores     = "../data/processed/accessibility_scores.csv"
+walk_graph = "./data/osm/kyiv_walk_graph.pkl"
+
+
+# ── Ізохрони ─────────────────────────────────────────────────────────────────
+# Швидкість ходьби 4.5 км/год → 75 м/хв.
+# Використовується: config_loader.py (аліаси WALK_10MIN_M, WALK_30MIN_M, ACC_RADIUS)
 
 [isochrone]
-# Радіуси ізохрон у метрах (швидкість ходьби 4.5 км/год)
-walk_10min_m = 750
-walk_30min_m = 2250
+walk_10min_m       = 750    # 10 хв × 75 м/хв
+walk_30min_m       = 2250   # 30 хв × 75 м/хв
+accessibility_radius = "10min"  # "10min" або "30min" — радіус для індексу
 
-# Яку ізохрону використовувати для індексу доступності: "10min" або "30min"
-# 10min — реалістична піша доступність до зупинки
-# 30min — максимальний радіус охоплення
-accessibility_radius = "10min"
+
+# ── Часові вікна ─────────────────────────────────────────────────────────────
+# Використовується: 07b, 07d, 09a, 10g, 10h
 
 [peak_hours]
-# Пікові години у форматах HH:MM (для розрахунку частоти)
-morning_start = "07:00"
-morning_end   = "09:00"
-evening_start = "17:00"
-evening_end   = "19:00"
-total_peak_hours = 4   # загальна кількість пікових годин
-
-[accessibility]
-# Ваги компонентів індексу (сума = 1.0)
-weight_stops     = 0.4   # кількість зупинок у зоні
-weight_routes    = 0.3   # кількість унікальних маршрутів
-weight_frequency = 0.3   # модельна транспортна інтенсивність, не фізичні рейси/год
-
-[clustering]
-kmeans_k       = 4        # кількість кластерів KMeans
-random_state   = 42
-dbscan_eps     = 0.1      # радіус сусідства DBSCAN
-dbscan_min_samples = 5
+morning_start    = "07:00"
+morning_end      = "09:00"
+evening_start    = "17:00"
+evening_end      = "19:00"
+total_peak_hours = 4        # загальна тривалість пікового вікна (год)
 
 [offpeak_hours]
-# Міжпіковий час будніх днів
 start = "09:00"
 end   = "17:00"
-total_offpeak_hours = 8
+
+
+# ── Catchment-аналіз ─────────────────────────────────────────────────────────
+# Використовується: 07a, 07b, 07bt, 07c, 07d
 
 [catchment]
-# Порогові значення catchment-аналізу (хвилини ходьби)
-threshold_short_min = 10
-threshold_long_min  = 30
-min_transit_min = 1.5
-min_per_stop_span_min = 1.0
+threshold_short_min   = 10    # поріг "короткої" групи (walk/transit ≤10 хв)
+threshold_long_min    = 30    # поріг "довгої" групи  (walk/transit ≤30 хв)
+min_transit_min       = 1.5   # мінімально правдоподібний час поїздки між зупинками
+min_per_stop_span_min = 1.0   # мінімум хвилин на 1 перегін (для фільтрації шуму)
 
-# Які групи є активними. Вилучи рядок — і все з ним пов'язане
-# (обрахунок, карта, діаграми, легенда) автоматично зникне.
-# Допустимі значення: walk_10min, transit_10min, walk_30min, transit_30min
+# Активні групи catchment-аналізу. Вилучи рядок — і вся пов'язана логіка
+# (обрахунок, карта, діаграми, легенда) автоматично вимикається.
+# Допустимі значення: "walk_10min", "transit_10min", "walk_30min", "transit_30min"
 active_groups = ["walk_10min", "transit_10min", "transit_30min"]
 
-# Малювати реальні Dijkstra-шляхи від будинку до закладу при наведенні.
-# true  — малює піший / транзитний шлях по вулицях (~1-2 хв додатково до 07d)
-# false — шляхи не обраховуються і не зберігаються в GeoJSON (швидший запуск)
+# Маршрути з 1 пересадкою (крок 07bt → 07c).
+# true  — будує матрицю пересадок та включає в catchment
+# false — тільки прямий транзит, крок 07bt пропускається
+allow_transfers       = true
+max_transfer_wait_min = 15.0  # макс. очікування на зупинці пересадки (хв)
+
+# Dijkstra-шляхи від будинку до закладу (крок 07d, при наведенні на маркер).
+# true  — малює реальні вуличні шляхи (~1-2 хв додатково до запуску 07d)
+# false — шляхи не обчислюються; карта будується швидше
 draw_walk_paths = false
+
+
+# ── Індекс доступності ───────────────────────────────────────────────────────
+# Ваги score = w_stops·norm(n_stops) + w_routes·norm(n_routes) + w_freq·norm(freq)
+# Сума ваг має дорівнювати 1.0.
+# Використовується: config_loader.py (аліаси W_STOPS, W_ROUTES, W_FREQ)
+
+[accessibility]
+weight_stops     = 0.4
+weight_routes    = 0.3
+weight_frequency = 0.3
+
+
+# ── Кластеризація ────────────────────────────────────────────────────────────
+# KMeans (k=kmeans_k, seed=random_state). DBSCAN виключено з пайплайну.
+# Використовується: config_loader.py (аліаси KMEANS_K, RANDOM_STATE)
+
+[clustering]
+kmeans_k     = 4
+random_state = 42
+
+
+# ── Регресія ─────────────────────────────────────────────────────────────────
+# GradientBoostingRegressor + SHAP (крок 11).
+# Використовується: 11
 
 [regression]
 test_size    = 0.2
 random_state = 42
-n_estimators = 200        # GradientBoostingRegressor
+n_estimators = 200
+
+
+# ── RL-оптимізація маршрутних частот ─────────────────────────────────────────
+# Кроки: 10rl (навчання PPO), 10g (greedy-зонд), 10h (звіт), 10i (парсинг)
 
 [rl]
-# Безпечний дебаг-режим за замовчуванням: без subprocess і з 1 env.
-# target_facility_id = "H327"
-# Якщо потрібно тестувати групу закладів, список нижче має пріоритет
-# над одиночним target_facility_id.
-# target_facility_ids = ["H274", "H24", "H340", "H150"]
-target_facility_id = ""
-# Якщо target_facility_id(s) порожні, 10g автоматично вибирає цільові заклади:
-#   "bottom_n" / "worst" / "auto" — вибирає до target_auto_count найгірших
-#   "all"                         — вибирає всі заклади з transit-маршрутами
-target_selection = "all"
-target_auto_count = 50
-max_steps = 50
-target_auto_min_actions = 6
-target_auto_max_candidates = 250
-target_auto_min_i_peak = 0.000001
-require_osm_mapping = true
 
-use_subproc = true
-n_envs = 8
-total_timesteps = 50000
-learning_rate = 0.0003
-n_steps = 50
-log_every = 100
+# ─ Цільові заклади ─
+# Задай конкретний заклад (напр. "H327") або залиш "" для авто-вибору.
+target_facility_id  = ""
+# target_facility_ids = ["H274", "H24", "H340", "H150"]   # список → пріоритет над одиночним
+
+# Режим авто-вибору (якщо target_facility_id і target_facility_ids порожні):
+#   "all"       — всі заклади з transit-маршрутами
+#   "bottom_n"  — найгірші (до target_auto_count)
+target_selection        = "all"
+target_auto_count       = 50
+target_auto_min_actions = 6    # мінімум доступних дій для відбору
+target_auto_max_candidates = 250
+target_auto_min_i_peak  = 0.000001
+
+# ─ Дані та маршрути ─
+require_osm_mapping      = true   # фільтрувати маршрути без OSM-відображення
+exclude_transport_types  = []     # напр. ["metro"] щоб виключити метро з дій
+
+# ─ PPO-навчання ─
+use_subproc      = true
+n_envs           = 8
+total_timesteps  = 50000
+learning_rate    = 0.0003
+n_steps          = 50       # кроків rollout на env до оновлення
+log_every        = 100
 checkpoint_every = 500
-max_route_delta = 6
-action_step = 2
-freq_scaling = "linear"  # "log" або "linear"
-non_target_harm_weight = 1.0
-# Ігноруємо мікроскопічний числовий шум при штрафі за шкоду нецільовим закладам.
-non_target_harm_tolerance = 0.000000001
-metric_epsilon = 0.00000001
-# Не приймати greedy-крок, якщо він погіршує хоча б один target-заклад
-# більше ніж на target_harm_tolerance.
-enforce_target_non_worsening = false
-target_harm_tolerance = 0.00000001
-# Додатковий навчальний сигнал за зменшення wait для target. 0.0 = вимкнено.
-target_wait_reward_weight = 0.0
-# Для тесту локальніше без метро можна поставити ["metro"].
-exclude_transport_types = []
+
+# ─ Простір дій ─
+max_route_delta = 6      # максимальна зміна частоти за 1 дію (рейсів/год)
+action_step     = 2      # крок зміни частоти
+freq_scaling    = "linear"  # нормалізація дій: "linear" або "log"
+
+# ─ Функція винагороди ─
+reward_scale              = 1.0
+non_target_harm_weight    = 1.0
+non_target_harm_tolerance = 0.000000001  # ігноруємо числовий шум < цього
+metric_epsilon            = 0.00000001   # запобігає діленню на нуль
+target_wait_reward_weight = 0.0          # 0.0 = вимкнено
+
+# ─ Greedy-зонд (крок 10g) ─
+enforce_target_non_worsening = false   # відхиляти крок якщо хоч один target погіршується
+target_harm_tolerance        = 0.00000001
+
+# ─ Міжтипові пересадки ресурсу ─
+# true = дозволяє перерозподіл між типами (напр. trol → bus)
+# Керується детально через [rl.transfer_compatibility] нижче.
+allow_cross_type_transfers = false
 
 [rl.vehicle_capacity]
-# Орієнтовна місткість одного транспортного засобу, пасажирів.
-# Якщо знайдуться точніші дані по типах/моделях, ці значення можна замінити.
-bus = 80
-trol = 100
-tram = 160
+# Орієнтовна місткість ТЗ (пасажирів). Впливає на розрахунок наповненості.
+bus   = 80
+trol  = 100
+tram  = 160
 metro = 1500
 
 [rl.transfer_compatibility]
-# Матриця сумісності перерозподілу ресурсу: donor -> allowed receivers.
-# Для тролейбусного ресурсу дозволяємо також автобусний receiver:
-# це означає сценарій підсилення коридору автобусом, а не появу
-# тролейбусної лінії там, де немає контактної мережі.
-bus = ["bus"]
-trol = ["trol", "bus"]
-tram = ["tram"]
+# Які типи ТЗ можуть отримати ресурс від донора.
+# trol → bus: автобус підсилює коридор там, де немає контактної мережі.
+bus   = ["bus"]
+trol  = ["trol", "bus"]
+tram  = ["tram"]
 metro = ["metro"]
