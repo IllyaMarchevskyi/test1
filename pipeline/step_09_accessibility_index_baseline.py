@@ -340,5 +340,104 @@ def run() -> None:
         print(f"p-value: {moran_p_value:.4f}")
 
 
+def run_validate() -> None:
+    """Топ/боттом-5 та карта екстремумів. Колишній крок 09b."""
+    from config_loader import cfg
+    import os
+    import warnings
+
+    import folium
+    import pandas as pd
+
+    warnings.filterwarnings("ignore")
+
+    PROCESSED_DIR = "./data/processed"
+    OUTPUTS_DIR = "./data/outputs"
+    INDEX_PREVIEW_PATH = f"{PROCESSED_DIR}/accessibility_index_preview_baseline.csv"
+    CATCHMENT_RESULTS_PATH = f"{PROCESSED_DIR}/catchment_results_baseline.csv"
+    SCORES_PATH = cfg["paths"]["scores"]
+    OUT_TOP5 = f"{PROCESSED_DIR}/accessibility_index_top5_baseline.csv"
+    OUT_BOTTOM5 = f"{PROCESSED_DIR}/accessibility_index_bottom5_baseline.csv"
+    OUT_HTML = f"{OUTPUTS_DIR}/accessibility_index_extremes_baseline.html"
+
+    os.makedirs(PROCESSED_DIR, exist_ok=True)
+    os.makedirs(OUTPUTS_DIR, exist_ok=True)
+
+    required = [INDEX_PREVIEW_PATH, CATCHMENT_RESULTS_PATH, SCORES_PATH]
+    missing = [p for p in required if not os.path.exists(p)]
+    if missing:
+        raise FileNotFoundError(f"Відсутні входи для 09_validate: {missing}")
+
+    if all(os.path.exists(p) for p in [OUT_TOP5, OUT_BOTTOM5, OUT_HTML]):
+        outputs_mtime = min(os.path.getmtime(OUT_TOP5), os.path.getmtime(OUT_BOTTOM5), os.path.getmtime(OUT_HTML))
+        if outputs_mtime >= max(os.path.getmtime(p) for p in required):
+            print("09_validate: кеш актуальний.")
+            return
+
+    print("09_validate: готуємо топ/боттом-5 та карту екстремумів...")
+    index_preview = pd.read_csv(INDEX_PREVIEW_PATH)
+    catchment = pd.read_csv(CATCHMENT_RESULTS_PATH)
+    scores = pd.read_csv(SCORES_PATH, usecols=["facility_id", "lat", "lon"])
+
+    for df in [index_preview, catchment, scores]:
+        df["facility_id"] = df["facility_id"].astype(str)
+    for col in ["I_peak", "I_offpeak", "R", "TGI"]:
+        if col in index_preview.columns:
+            index_preview[col] = pd.to_numeric(index_preview[col], errors="coerce")
+
+    merged = index_preview.merge(catchment, on=["facility_id", "facility_type", "name"], how="left").merge(scores, on="facility_id", how="left")
+    top5 = merged.sort_values(["I_peak", "I_offpeak"], ascending=[False, False]).head(5).copy()
+    bottom5 = merged.sort_values(["I_peak", "I_offpeak"], ascending=[True, True]).head(5).copy()
+    top5.to_csv(OUT_TOP5, index=False, encoding="utf-8")
+    bottom5.to_csv(OUT_BOTTOM5, index=False, encoding="utf-8")
+
+    m = folium.Map(location=[cfg["city"]["center_lat"], cfg["city"]["center_lon"]], zoom_start=11, tiles="CartoDB positron")
+    layer_top = folium.FeatureGroup(name="Топ-5 за I*_peak", show=True)
+    layer_bottom = folium.FeatureGroup(name="Боттом-5 за I*_peak", show=True)
+
+    def add_rows(df, layer, color, label):
+        for row in df.itertuples(index=False):
+            name = str(row.name) if pd.notna(row.name) else "Без назви"
+            popup_html = (
+                f"<div style='font-family:Arial,sans-serif;font-size:13px;width:260px'>"
+                f"<b>{name[:60]}</b><br>ID: <b>{row.facility_id}</b><br>"
+                f"Тип: <b>{'Лікарня' if row.facility_type == 'hospital' else 'Школа'}</b><hr style='margin:6px 0'>"
+                f"I*_peak: <b>{float(row.I_peak):.4f}</b><br>I*_offpeak: <b>{float(row.I_offpeak):.4f}</b><br>"
+                f"R: <b>{'—' if pd.isna(row.R) else f'{float(row.R):.4f}'}</b><br>"
+                f"TGI: <b>{'—' if pd.isna(row.TGI) else f'{float(row.TGI):.4f}'}</b></div>"
+            )
+            folium.CircleMarker(
+                location=[float(row.lat), float(row.lon)],
+                radius=8, color=color, fill=True, fill_color=color, fill_opacity=0.95, weight=2,
+                popup=folium.Popup(popup_html, max_width=280),
+                tooltip=f"{label}: {name[:45]}",
+            ).add_to(layer)
+
+    add_rows(top5, layer_top, "#1B9E3E", "Топ")
+    add_rows(bottom5, layer_bottom, "#C0392B", "Боттом")
+    layer_top.add_to(m)
+    layer_bottom.add_to(m)
+    folium.LayerControl(collapsed=False).add_to(m)
+    m.get_root().html.add_child(folium.Element(
+        "<div style='position:fixed;bottom:22px;right:22px;z-index:9999;background:rgba(255,255,255,0.92);"
+        "border:1px solid #ccc;border-radius:8px;padding:10px 12px;font-family:Arial,sans-serif;font-size:13px'>"
+        "<b>Валідація I*_peak</b><br><span style='color:#1B9E3E;'>●</span> Топ-5<br>"
+        "<span style='color:#C0392B;'>●</span> Боттом-5</div>"
+    ))
+    m.save(OUT_HTML)
+
+    print(f"09_validate: top5={OUT_TOP5}  bottom5={OUT_BOTTOM5}  map={OUT_HTML}")
+    print("\nТоп-5:"); [print(f"  {str(r.name)[:55]:<55} I*={float(r.I_peak):.4f}") for r in top5.itertuples(index=False)]
+    print("Боттом-5:"); [print(f"  {str(r.name)[:55]:<55} I*={float(r.I_peak):.4f}") for r in bottom5.itertuples(index=False)]
+
+
+_original_run = run
+
+
+def run() -> None:
+    _original_run()
+    run_validate()
+
+
 if __name__ == "__main__":
     run()

@@ -22,6 +22,67 @@ def run() -> None:
 
     warnings.filterwarnings("ignore")
 
+    # ── Bootstrap: забезпечити walk_graph і accessibility_scores ──────────────
+    import shutil
+
+    def _ensure_prerequisites() -> None:
+        graph_path = cfg["paths"]["walk_graph"]
+        scores_path = cfg["paths"]["scores"]
+        old_graph = "../data/osm/kyiv_walk_graph.pkl"
+        old_scores = "../data/processed/accessibility_scores.csv"
+
+        os.makedirs(os.path.dirname(graph_path), exist_ok=True)
+        os.makedirs(os.path.dirname(scores_path), exist_ok=True)
+
+        if not os.path.exists(graph_path):
+            if os.path.exists(old_graph):
+                print(f"07a: копіюємо walk graph {old_graph} → {graph_path}")
+                shutil.copy2(old_graph, graph_path)
+            else:
+                city = cfg["city"]["name"]
+                print(f"07a: завантажуємо walk graph для '{city}' з OSM…")
+                G = ox.graph_from_place(city, network_type="walk")
+                with open(graph_path, "wb") as fh:
+                    pickle.dump(G, fh, protocol=4)
+                print(f"07a: walk graph збережено → {graph_path}")
+
+        if not os.path.exists(scores_path):
+            if os.path.exists(old_scores):
+                print(f"07a: копіюємо scores {old_scores} → {scores_path}")
+                shutil.copy2(old_scores, scores_path)
+            else:
+                city = cfg["city"]["name"]
+                print(f"07a: завантажуємо лікарні і школи для '{city}' з OSM…")
+                rows = []
+                for tags, ftype, prefix in [
+                    ({"amenity": ["hospital", "clinic"]}, "hospital", "H"),
+                    ({"amenity": "school"}, "school", "S"),
+                ]:
+                    try:
+                        gdf = ox.features_from_place(city, tags=tags)
+                        gdf = gdf[gdf.geometry.geom_type.isin(["Point", "Polygon", "MultiPolygon"])].copy()
+                        gdf["geometry"] = gdf.geometry.centroid
+                        gdf = gdf.to_crs("EPSG:4326").reset_index()
+                        for i, r in enumerate(gdf.itertuples(index=False)):
+                            rows.append({
+                                "facility_id": f"{prefix}{i}",
+                                "facility_type": ftype,
+                                "name": str(getattr(r, "name", "") or ""),
+                                "lon": r.geometry.x,
+                                "lat": r.geometry.y,
+                                "accessibility_score": 0.0,
+                                "frequency": 0.0,
+                            })
+                    except Exception as exc:
+                        print(f"07a: попередження — не вдалося завантажити {ftype}: {exc}")
+                if not rows:
+                    raise RuntimeError("07a: не вдалося отримати заклади з OSM для accessibility_scores.csv")
+                pd.DataFrame(rows).to_csv(scores_path, index=False, encoding="utf-8")
+                print(f"07a: accessibility_scores.csv збережено ({len(rows)} закладів) → {scores_path}")
+
+    _ensure_prerequisites()
+    # ──────────────────────────────────────────────────────────────────────────
+
     T_SHORT = cfg["catchment"]["threshold_short_min"]
     T_LONG = cfg["catchment"]["threshold_long_min"]
     R_SHORT = T_SHORT * 75

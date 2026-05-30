@@ -11,24 +11,22 @@ PIPELINE_DIR = Path(__file__).resolve().parent
 ROOT_DIR = PIPELINE_DIR.parent
 
 STEPS = [
-    ("07a", "pipeline.step_07a_precompute_buildings_baseline", "Baseline precompute buildings"),
-    ("07b", "pipeline.step_07b_transit_matrix_baseline", "Baseline transit matrix"),
-    ("07c", "pipeline.step_07c_catchment_calc_baseline", "Baseline catchment calculation"),
-    ("07d", "pipeline.step_07d_results_map_baseline", "Baseline results map"),
-    ("08a", "pipeline.step_08a_building_weights_baseline", "Baseline building weights"),
-    ("08b", "pipeline.step_08b_facility_entropy_baseline", "Baseline facility entropy"),
-    ("08c", "pipeline.step_08c_missing_names_map", "Facilities with missing names map"),
-    ("09a", "pipeline.step_09_accessibility_index_baseline", "Baseline accessibility index"),
-    ("09b", "pipeline.step_09b_validate_index_baseline", "Baseline accessibility validation"),
-    ("10i", "pipeline.step_10i_dispatch_parser", "Dispatch schedule parser"),
-    ("10rl", "pipeline.step_10_graph_rl_baseline", "Baseline graph RL"),
-    ("10b", "pipeline.step_10b_h327_route_debug", "H327 local route schedule debug"),
-    ("10c", "pipeline.step_10c_rl_recompute_check", "RL baseline vs recompute check"),
-    ("10d", "pipeline.step_10d_all_routes_freq_debug", "All routes weekdays frequency debug"),
-    ("10e", "pipeline.step_10e_target_group_debug", "RL target group debug"),
-    ("10f", "pipeline.step_10f_rl_action_probe", "RL one-step action probe"),
-    ("10g", "pipeline.step_10g_apply_best_probe", "Apply best RL probe action"),
-    ("10h", "pipeline.step_10h_practical_recommendations", "Practical RL recommendations"),
+    # ── Підготовка даних ─────────────────────────────────────────────────────
+    ("07a",   "pipeline.step_07a_precompute_buildings_baseline", "Будинки, зупинки → кеш Dijkstra"),
+    ("07b",   "pipeline.step_07b_transit_matrix_baseline",       "Матриця досяжності зупинок (пік/міжпік)"),
+    ("07c",   "pipeline.step_07c_catchment_calc_baseline",       "Catchment: скільки людей дістається до кожного закладу"),
+    ("07d",   "pipeline.step_07d_results_map_baseline",          "Інтерактивна карта catchment"),
+    # ── Preprocessing ────────────────────────────────────────────────────────
+    ("08",    "pipeline.step_08_preprocessing_baseline",         "Ваги будинків w_b + ентропія H(f)/H_max"),
+    ("08c",   "pipeline.step_08c_missing_names_map",             "Карта закладів без назв"),
+    # ── Індекс доступності ───────────────────────────────────────────────────
+    ("09a",   "pipeline.step_09_accessibility_index_baseline",   "Індекс I*_peak + top/bottom-5 валідація"),
+    # ── RL-оптимізація ───────────────────────────────────────────────────────
+    ("10i",   "pipeline.step_10i_dispatch_parser",               "Парсинг диспетчерських розкладів"),
+    ("10rl",  "pipeline.step_10_graph_rl_baseline",              "Навчання PPO-агента"),
+    ("10diag","pipeline.step_10_diagnostics",                    "RL-діагностика (розклади, recompute, частоти, target, probe)"),
+    ("10g",   "pipeline.step_10g_apply_best_probe",              "Greedy-оптимізація маршрутних частот"),
+    ("10h",   "pipeline.step_10h_practical_recommendations",     "Практичні рекомендації → звіт"),
 ]
 
 STEP_OUTPUTS = {
@@ -55,10 +53,8 @@ STEP_OUTPUTS = {
         PIPELINE_DIR / "data/outputs/output.png",
         PIPELINE_DIR / "data/outputs/map_buildings_baseline",
     ],
-    "08a": [
+    "08": [
         PIPELINE_DIR / "data/processed/building_weights_baseline.parquet",
-    ],
-    "08b": [
         PIPELINE_DIR / "data/processed/facility_entropy_baseline.parquet",
         PIPELINE_DIR / "data/processed/facility_entropy_baseline.csv",
         PIPELINE_DIR / "data/processed/facility_entropy_preview_baseline.csv",
@@ -73,8 +69,6 @@ STEP_OUTPUTS = {
         PIPELINE_DIR / "data/processed/global_metrics_baseline.json",
         PIPELINE_DIR / "data/processed/car_accessibility_baseline.csv",
         PIPELINE_DIR / "data/processed/kyiv_drive_graph_proj_baseline.pkl",
-    ],
-    "09b": [
         PIPELINE_DIR / "data/processed/accessibility_index_top5_baseline.csv",
         PIPELINE_DIR / "data/processed/accessibility_index_bottom5_baseline.csv",
         PIPELINE_DIR / "data/outputs/accessibility_index_extremes_baseline.html",
@@ -101,25 +95,17 @@ STEP_OUTPUTS = {
         PIPELINE_DIR / "data/outputs/rl_targets_route_changes.png",
         PIPELINE_DIR / "data/outputs/rl_targets_wait_before_after_scatter.png",
     ],
-    "10b": [
+    "10diag": [
         PIPELINE_DIR / "data/processed/h327_route_schedule_debug.csv",
         PIPELINE_DIR / "data/processed/h327_route_schedule_stops_debug.csv",
-    ],
-    "10c": [
         PIPELINE_DIR / "data/processed/rl_recompute_check_targets.csv",
         PIPELINE_DIR / "data/processed/rl_recompute_check_summary.json",
-    ],
-    "10d": [
         PIPELINE_DIR / "data/processed/all_routes_weekdays_freq_debug.csv",
-    ],
-    "10e": [
         PIPELINE_DIR / "data/processed/rl_target_group_debug_summary.json",
         PIPELINE_DIR / "data/processed/rl_target_group_routes.csv",
         PIPELINE_DIR / "data/processed/rl_target_group_affected_facilities.csv",
         PIPELINE_DIR / "data/processed/rl_target_group_candidates.csv",
         PIPELINE_DIR / "data/processed/rl_target_group_time_components.csv",
-    ],
-    "10f": [
         PIPELINE_DIR / "data/processed/rl_action_probe.csv",
         PIPELINE_DIR / "data/processed/rl_action_probe_summary.json",
     ],

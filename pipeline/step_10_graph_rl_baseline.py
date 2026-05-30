@@ -71,7 +71,7 @@ def run() -> None:
     DISPATCH_ROUTE_STATS = PROCESSED_DIR / "dispatch_route_stats.csv"
     EASYWAY_ROUTES = Path("../gtfs_static/easyway_routes.csv")
     EASYWAY_METRO = Path("../gtfs_static/easyway_metro.csv")
-    SCORES_PATH = Path("../data/processed/accessibility_scores.csv")
+    SCORES_PATH = Path(cfg["paths"]["scores"])
     OSM_BRIDGE_PATH = Path("../gtfs_static/osm_easyway_data.csv")
     OSM_STOPS_PATH = Path("../gtfs_static/osm_stops.csv")
     OSM_BRIDGE_METRO_PATH = Path("../gtfs_static/osm_easyway_metro_data.csv")

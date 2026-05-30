@@ -220,11 +220,17 @@ def run() -> None:
             if 0 < diff < 4 * 3600:
                 paired.append(diff / 60.0)
         if paired:
+            # zip-based pairing is reliable only for the first few departures
+            # (before headway changes cause alignment drift between first and last stop).
+            # Using minimum of valid pairs (>= 5 min) gives actual travel time; median
+            # inflates results for high-frequency routes like metro.
+            valid = [p for p in paired if p >= 5.0]
+            one_way = float(min(valid)) if valid else float(np.median(paired))
             duration_rows.append(
                 {
                     "route_id": str(first_row.route_id),
                     "direction": str(first_row.direction),
-                    "one_way_duration_min": float(np.median(paired)),
+                    "one_way_duration_min": one_way,
                 }
             )
     duration_df = pd.DataFrame(duration_rows)
