@@ -22,11 +22,22 @@ def run() -> None:
 
     T_SHORT = cfg["catchment"]["threshold_short_min"]
     T_LONG = cfg["catchment"]["threshold_long_min"]
-    R_LONG = T_LONG * 75
-    GRP_WALK_SHORT = f"walk_{T_SHORT}min"
+    GRP_WALK_SHORT    = f"walk_{T_SHORT}min"
     GRP_TRANSIT_SHORT = f"transit_{T_SHORT}min"
-    GRP_WALK_LONG = f"walk_{T_LONG}min"
-    GRP_TRANSIT_LONG = f"transit_{T_LONG}min"
+    GRP_WALK_LONG     = f"walk_{T_LONG}min"
+    GRP_TRANSIT_LONG  = f"transit_{T_LONG}min"
+
+    # Groups that are currently enabled (read from config; all groups = default)
+    ACTIVE_GROUPS = set(cfg["catchment"].get("active_groups",
+        [GRP_WALK_SHORT, GRP_TRANSIT_SHORT, GRP_WALK_LONG, GRP_TRANSIT_LONG]))
+
+    # Effective max thresholds: skip computation beyond the highest active group
+    _walk_thresh    = max(T_SHORT if GRP_WALK_SHORT    in ACTIVE_GROUPS else 0,
+                          T_LONG  if GRP_WALK_LONG     in ACTIVE_GROUPS else 0)
+    _transit_thresh = max(T_SHORT if GRP_TRANSIT_SHORT in ACTIVE_GROUPS else 0,
+                          T_LONG  if GRP_TRANSIT_LONG  in ACTIVE_GROUPS else 0)
+    R_WALK    = _walk_thresh    * 75   # metres — walk Dijkstra cutoff
+    R_TRANSIT = _transit_thresh        # minutes — max total transit time
     PROCESSED_DIR = "./data/processed"
 
     BUILDINGS_PATH = "../data/processed/buildings.parquet"
@@ -157,17 +168,20 @@ def run() -> None:
         )
 
     def classify_group(time_min: float, mode: str) -> str | None:
-        if mode == "walk" and time_min <= T_SHORT:
+        """Return the best active group for (time_min, mode), or None if not in any active group."""
+        if mode == "walk" and time_min <= T_SHORT and GRP_WALK_SHORT in ACTIVE_GROUPS:
             return GRP_WALK_SHORT
-        if mode == "transit" and time_min <= T_SHORT:
+        if mode == "transit" and time_min <= T_SHORT and GRP_TRANSIT_SHORT in ACTIVE_GROUPS:
             return GRP_TRANSIT_SHORT
-        if mode == "walk" and time_min <= T_LONG:
+        if mode == "walk" and time_min <= T_LONG and GRP_WALK_LONG in ACTIVE_GROUPS:
             return GRP_WALK_LONG
-        if mode == "transit" and time_min <= T_LONG:
+        if mode == "transit" and time_min <= T_LONG and GRP_TRANSIT_LONG in ACTIVE_GROUPS:
             return GRP_TRANSIT_LONG
         return None
 
     def count_transit_direct(rev_dict, wait_dict, facility_id: str) -> dict[int, dict[str, object]]:
+        if R_TRANSIT == 0:
+            return {}
         stops_near_fac = fac_stop_dict.get(facility_id, {})
         bld_min_time = {}
 
@@ -179,14 +193,14 @@ def run() -> None:
                     continue
 
                 fixed_time = wait_min + transit_min + walk_out
-                if fixed_time > T_LONG:
+                if fixed_time > R_TRANSIT:
                     continue
 
                 for bid, walk_in in stop_bld_dict.get(stop_a, {}).items():
                     total_min = walk_in + fixed_time
                     current = bld_min_time.get(bid)
                     current_total = float(current["total_min"]) if current is not None else float("inf")
-                    if total_min <= T_LONG and total_min < current_total:
+                    if total_min <= R_TRANSIT and total_min < current_total:
                         bld_min_time[bid] = {
                             "total_min": float(total_min),
                             "mode": "transit",
@@ -206,10 +220,12 @@ def run() -> None:
         return bld_min_time
 
     def count_walk_direct(center_node: int) -> dict[int, float]:
-        dists = nx.single_source_dijkstra_path_length(g_proj, center_node, cutoff=R_LONG, weight="length")
+        if R_WALK == 0:
+            return {}
+        dists = nx.single_source_dijkstra_path_length(g_proj, center_node, cutoff=R_WALK, weight="length")
         walk_times = {}
         for node_id, dist_m in dists.items():
-            if node_id not in bld_by_node or dist_m > R_LONG:
+            if node_id not in bld_by_node or dist_m > R_WALK:
                 continue
             walk_min = float(dist_m) / 75.0
             for bid in bld_by_node[node_id]:
@@ -227,42 +243,21 @@ def run() -> None:
         transit_peak_times = count_transit_direct(rev_peak_dict, wait_peak_dict, fid)
         transit_offpeak_times = count_transit_direct(rev_offpeak_dict, wait_offpeak_dict, fid)
 
-        best_peak = {
-            bid: {
-                "total_min": float(time_min),
-                "mode": "walk",
-                "walk_in_min": None,
-                "wait_min": None,
-                "transit_min": None,
-                "walk_out_min": None,
-                "route_id": None,
-                "route": None,
-                "transport": None,
-                "direction": None,
-                "route_options": None,
-                "source_stop": None,
-                "dest_stop": None,
+        def _walk_entry(t: float) -> dict:
+            return {
+                "total_min": float(t), "mode": "walk",
+                "walk_in_min": None, "wait_min": None, "transit_min": None,
+                "walk_out_min": None, "route_id": None, "route": None,
+                "transport": None, "direction": None, "route_options": None,
+                "source_stop": None, "dest_stop": None,
             }
-            for bid, time_min in walk_times.items()
-        }
-        best_offpeak = {
-            bid: {
-                "total_min": float(time_min),
-                "mode": "walk",
-                "walk_in_min": None,
-                "wait_min": None,
-                "transit_min": None,
-                "walk_out_min": None,
-                "route_id": None,
-                "route": None,
-                "transport": None,
-                "direction": None,
-                "route_options": None,
-                "source_stop": None,
-                "dest_stop": None,
-            }
-            for bid, time_min in walk_times.items()
-        }
+
+        # Only include walk buildings that fall in an active walk group.
+        # Buildings outside active groups are excluded here; transit may still claim them below.
+        best_peak    = {bid: _walk_entry(t) for bid, t in walk_times.items()
+                        if classify_group(float(t), "walk") is not None}
+        best_offpeak = {bid: _walk_entry(t) for bid, t in walk_times.items()
+                        if classify_group(float(t), "walk") is not None}
 
         for bid, transit_info in transit_peak_times.items():
             if float(transit_info["total_min"]) < float(best_peak.get(bid, {"total_min": float("inf")})["total_min"]):

@@ -15,7 +15,7 @@ osm_stops   = "../data/osm/osm_stops.gpkg"
 metro       = "../data/osm/metro.gpkg"
 hospitals   = "../data/osm/hospitals.gpkg"
 schools     = "../data/osm/schools.gpkg"
-walk_graph  = "../data/osm/kyiv_walk_graph.pkl"
+walk_graph  = "./data/osm/kyiv_walk_graph.pkl"
 isochrones  = "../data/processed/isochrone_results.parquet"
 scores      = "../data/processed/accessibility_scores.csv"
 clustered   = "../data/processed/clustered_facilities.csv"
@@ -64,6 +64,16 @@ threshold_long_min  = 30
 min_transit_min = 1.5
 min_per_stop_span_min = 1.0
 
+# Які групи є активними. Вилучи рядок — і все з ним пов'язане
+# (обрахунок, карта, діаграми, легенда) автоматично зникне.
+# Допустимі значення: walk_10min, transit_10min, walk_30min, transit_30min
+active_groups = ["walk_10min", "transit_10min", "transit_30min"]
+
+# Малювати реальні Dijkstra-шляхи від будинку до закладу при наведенні.
+# true  — малює піший / транзитний шлях по вулицях (~1-2 хв додатково до 07d)
+# false — шляхи не обраховуються і не зберігаються в GeoJSON (швидший запуск)
+draw_walk_paths = false
+
 [regression]
 test_size    = 0.2
 random_state = 42
@@ -75,25 +85,27 @@ n_estimators = 200        # GradientBoostingRegressor
 # Якщо потрібно тестувати групу закладів, список нижче має пріоритет
 # над одиночним target_facility_id.
 # target_facility_ids = ["H274", "H24", "H340", "H150"]
-target_facility_id = "all"
-# Якщо target_facility_id(s) порожні, 10g автоматично вибирає
-# пріоритетну групу з усіх закладів за найнижчим I_peak.
-target_selection = "bottom_n"
-target_auto_count = 10
+target_facility_id = ""
+# Якщо target_facility_id(s) порожні, 10g автоматично вибирає цільові заклади:
+#   "bottom_n" / "worst" / "auto" — вибирає до target_auto_count найгірших
+#   "all"                         — вибирає всі заклади з transit-маршрутами
+target_selection = "all"
+target_auto_count = 50
+max_steps = 50
 target_auto_min_actions = 6
 target_auto_max_candidates = 250
 target_auto_min_i_peak = 0.000001
 require_osm_mapping = true
+
 use_subproc = true
-n_envs = 6
-max_steps = 10
+n_envs = 8
 total_timesteps = 50000
 learning_rate = 0.0003
 n_steps = 50
 log_every = 100
 checkpoint_every = 500
 max_route_delta = 6
-action_step = 1
+action_step = 2
 freq_scaling = "linear"  # "log" або "linear"
 non_target_harm_weight = 1.0
 # Ігноруємо мікроскопічний числовий шум при штрафі за шкоду нецільовим закладам.

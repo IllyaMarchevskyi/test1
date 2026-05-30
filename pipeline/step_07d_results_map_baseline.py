@@ -660,10 +660,30 @@ def run() -> None:
 
     T_SHORT = cfg["catchment"]["threshold_short_min"]
     T_LONG = cfg["catchment"]["threshold_long_min"]
-    GRP_WALK_SHORT = f"walk_{T_SHORT}min"
+    GRP_WALK_SHORT    = f"walk_{T_SHORT}min"
     GRP_TRANSIT_SHORT = f"transit_{T_SHORT}min"
-    GRP_WALK_LONG = f"walk_{T_LONG}min"
-    GRP_TRANSIT_LONG = f"transit_{T_LONG}min"
+    GRP_WALK_LONG     = f"walk_{T_LONG}min"
+    GRP_TRANSIT_LONG  = f"transit_{T_LONG}min"
+
+    # Ordered metadata for every possible group: (group_name, hex_color, display_label)
+    _ALL_GRP_DEFS = [
+        (GRP_WALK_SHORT,    "#1FFF2E", f"Пішки ≤{T_SHORT} хв"),
+        (GRP_TRANSIT_SHORT, "#EB9328", f"Транспорт ≤{T_SHORT} хв"),
+        (GRP_WALK_LONG,     "#1B6B23", f"Пішки ≤{T_LONG} хв"),
+        (GRP_TRANSIT_LONG,  "#FF0000", f"Транспорт ≤{T_LONG} хв"),
+    ]
+    _all_grp_names = [g for g, _, _ in _ALL_GRP_DEFS]
+    ACTIVE_GROUPS = set(cfg["catchment"].get("active_groups", _all_grp_names))
+    # Only keep groups in config-defined order
+    ACTIVE_GRP_DEFS = [(g, c, lbl) for g, c, lbl in _ALL_GRP_DEFS if g in ACTIVE_GROUPS]
+
+    # stats-key suffix used in fac["stats"] dict returned by catchment_map_export
+    _GRP_STAT_KEY = {
+        GRP_WALK_SHORT:    "walk_short",
+        GRP_TRANSIT_SHORT: "transit_short",
+        GRP_WALK_LONG:     "walk_long",
+        GRP_TRANSIT_LONG:  "transit_long",
+    }
 
     PROCESSED_DIR = "./data/processed"
     OUTPUTS_DIR = "./data/outputs"
@@ -837,20 +857,13 @@ def run() -> None:
         (axes[1], "school", "Школи"),
     ]:
         subset = catchment_results[catchment_results["facility_type"] == facility_type]
-        cols = [
-            f"peak_{GRP_WALK_SHORT}",
-            f"peak_{GRP_TRANSIT_SHORT}",
-            f"peak_{GRP_WALK_LONG}",
-            f"peak_{GRP_TRANSIT_LONG}",
-        ]
-        means = subset[cols].mean()
-        colors = ["#1FFF2E", "#EB9328", "#1B6B23", "#FF0000"]
-        ax.bar(range(len(cols)), means.values, color=colors, edgecolor="white")
+        cols   = [f"peak_{g}"                    for g, _, _   in ACTIVE_GRP_DEFS]
+        clrs   = [c                               for _, c, _   in ACTIVE_GRP_DEFS]
+        xlbls  = [lbl.replace(" ≤", "\n≤")        for _, _, lbl in ACTIVE_GRP_DEFS]
+        means  = subset[cols].mean()
+        ax.bar(range(len(cols)), means.values, color=clrs, edgecolor="white")
         ax.set_xticks(range(len(cols)))
-        ax.set_xticklabels(
-            [f"Пішки\n{T_SHORT}", f"Транспорт\n{T_SHORT}", f"Пішки\n{T_LONG}", f"Транспорт\n{T_LONG}"],
-            fontsize=9,
-        )
+        ax.set_xticklabels(xlbls, fontsize=9)
         ax.set_title(label, fontsize=11)
         ax.set_ylabel("Будинки")
         ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{int(x):,}"))
@@ -905,7 +918,8 @@ def run() -> None:
 
     # ── Add actual walk paths to per-facility GeoJSON files ───────────────
     walk_graph_path = "../data/osm/kyiv_walk_graph.pkl"
-    if stop_coords is not None and os.path.exists(walk_graph_path):
+    _draw_paths = cfg["catchment"].get("draw_walk_paths", True)
+    if _draw_paths and stop_coords is not None and os.path.exists(walk_graph_path):
         _add_walk_paths_to_geojson(
             geojson_dir=MAP_BUILDINGS_DIR,
             graph_path=walk_graph_path,
@@ -939,23 +953,23 @@ def run() -> None:
         icon = "+" if is_hosp else "B"
         layer = layer_hospitals if is_hosp else layer_schools
 
+        _peak_rows = "".join(
+            f"&nbsp;{lbl}: <b>{fac['stats'].get('peak_' + _GRP_STAT_KEY[g], 0):,}</b><br>"
+            for g, _, lbl in ACTIVE_GRP_DEFS
+        )
+        _offpeak_rows = "".join(
+            f"&nbsp;{lbl}: <b>{fac['stats'].get('offpeak_' + _GRP_STAT_KEY[g], 0):,}</b><br>"
+            for g, _, lbl in ACTIVE_GRP_DEFS
+        )
         popup_html = (
             f"<div style='width:230px;font-family:Arial,sans-serif;font-size:13px'>"
             f"<b style='font-size:14px'>{fac['name'][:55]}</b><br>"
             f"<span style='color:#666'>{'Лікарня' if is_hosp else 'Школа'}</span><br>"
             f"<span style='color:#666'>ID: {fac['id']}</span>"
             f"<hr style='margin:6px 0'>"
-            f"<b>Пік:</b><br>"
-            f"&nbsp;Пішки {T_SHORT} хв: <b>{fac['stats']['peak_walk_short']:,}</b><br>"
-            f"&nbsp;Транспорт {T_SHORT} хв: <b>{fac['stats']['peak_transit_short']:,}</b><br>"
-            f"&nbsp;Пішки {T_LONG} хв: <b>{fac['stats']['peak_walk_long']:,}</b><br>"
-            f"&nbsp;Транспорт {T_LONG} хв: <b>{fac['stats']['peak_transit_long']:,}</b>"
+            f"<b>Пік:</b><br>{_peak_rows}"
             f"<hr style='margin:6px 0'>"
-            f"<b>Міжпік:</b><br>"
-            f"&nbsp;Пішки {T_SHORT} хв: <b>{fac['stats']['offpeak_walk_short']:,}</b><br>"
-            f"&nbsp;Транспорт {T_SHORT} хв: <b>{fac['stats']['offpeak_transit_short']:,}</b><br>"
-            f"&nbsp;Пішки {T_LONG} хв: <b>{fac['stats']['offpeak_walk_long']:,}</b><br>"
-            f"&nbsp;Транспорт {T_LONG} хв: <b>{fac['stats']['offpeak_transit_long']:,}</b>"
+            f"<b>Міжпік:</b><br>{_offpeak_rows}"
             f"<hr style='margin:6px 0'>"
             f"<button onclick='showBuildings(\"{fac['id']}\")' "
             f"style='width:100%;padding:5px 0;background:{color};color:white;"
@@ -986,19 +1000,11 @@ def run() -> None:
     folium.LayerControl(collapsed=False).add_to(m)
 
     map_var = m.get_name()
-    grp_walk_short = map_data["grp_walk_short"]
-    grp_transit_short = map_data["grp_transit_short"]
-    grp_walk_long = map_data["grp_walk_long"]
-    grp_transit_long = map_data["grp_transit_long"]
+    _colors_js = json.dumps({g: c for g, c, _ in ACTIVE_GRP_DEFS}, ensure_ascii=False)
 
     js_code = f"""
     const MAP_DATA = {json.dumps(map_data, ensure_ascii=False)};
-    const COLORS = {{
-        '{grp_walk_short}': '#1FFF2E',
-        '{grp_transit_short}': '#EB9328',
-        '{grp_walk_long}': '#1B6B23',
-        '{grp_transit_long}': '#FF0000',
-    }};
+    const COLORS = {_colors_js};
 
     let currentMode = 'peak';
     let buildingsLayer = null;
@@ -1327,20 +1333,18 @@ def run() -> None:
     </div>
     """
 
+    _legend_items = "\n      ".join(
+        f'<span style="color:{c};font-size:18px;vertical-align:middle">●</span>'
+        f"&nbsp;{lbl}<br>"
+        for _, c, lbl in ACTIVE_GRP_DEFS
+    )
     legend_html = f"""
     <div style="position:fixed;bottom:30px;right:10px;z-index:1000;
                 background:white;padding:10px 14px;border-radius:6px;
                 box-shadow:0 2px 6px rgba(0,0,0,0.3);
                 font-family:Arial,sans-serif;font-size:12px;line-height:1.8">
       <b>Доступність будинків:</b><br>
-      <span style="color:#1FFF2E;font-size:18px;vertical-align:middle">●</span>
-      &nbsp;Пішки <= {T_SHORT} хв<br>
-      <span style="color:#EB9328;font-size:18px;vertical-align:middle">●</span>
-      &nbsp;Транспорт <= {T_SHORT} хв<br>
-      <span style="color:#1B6B23;font-size:18px;vertical-align:middle">●</span>
-      &nbsp;Пішки <= {T_LONG} хв<br>
-      <span style="color:#FF0000;font-size:18px;vertical-align:middle">●</span>
-      &nbsp;Транспорт <= {T_LONG} хв
+      {_legend_items}
     </div>
     """
 
